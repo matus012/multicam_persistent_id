@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import struct
 import subprocess
 import tarfile
 import zipfile
@@ -56,6 +57,8 @@ ARCHIVE_URL = (
     "http://documents.epfl.ch/groups/c/cv/cvlab-unit/www/data/Wildtrack/"
     "Wildtrack_dataset_full.zip"
 )
+# Observed 2026-07-28: 6,807,496,358 bytes, matching the server's Content-Length.
+KNOWN_SHA256 = "7f630f3adf305d05362379f2603c67b0c6a0b173dcec508020e98a7bde4e4492"
 
 _INSTRUCTIONS = f"""
 WILDTRACK is published by EPFL CVLab. As of this writing the annotated archive
@@ -105,11 +108,81 @@ def _safe_tar_members(tf: tarfile.TarFile, dest: Path) -> None:
             raise ValueError(f"tar member escapes destination directory: {member.name!r}")
 
 
+def repair_wrapped_offsets(zf: zipfile.ZipFile, archive: Path) -> int:
+    """Recover local-header offsets in a >4 GB zip written without ZIP64.
+
+    The WILDTRACK archive as published by EPFL is 6.8 GB but carries a plain
+    (non-ZIP64) end-of-central-directory record, so every 32-bit offset field
+    above 4 GB has wrapped. Python sees a central directory that appears to sit
+    4 GB earlier than it does, concludes the file has a 4 GB prepended blob, and
+    adds 2**32 to every member offset. Members genuinely past the 4 GB mark come
+    out right; everything before it points into hyperspace, and both Python's
+    zipfile and bsdtar report the archive as damaged.
+
+    Nothing here bypasses any protection — it is a plain arithmetic repair of a
+    known packaging bug. Each candidate offset is validated by checking for a
+    local-header signature AND a matching filename before it is accepted, so a
+    wrong guess cannot silently extract the wrong bytes.
+
+    Returns the number of members whose offset had to be corrected.
+    """
+    size = archive.stat().st_size
+    repaired = 0
+    with archive.open("rb") as handle:
+        for info in zf.infolist():
+            candidates = (
+                info.header_offset,
+                info.header_offset - (1 << 32),
+                info.header_offset + (1 << 32),
+            )
+            for candidate in candidates:
+                if not 0 <= candidate < size - 30:
+                    continue
+                handle.seek(candidate)
+                header = handle.read(30)
+                if header[:4] != b"PK\x03\x04":
+                    continue
+                name_len, extra_len = struct.unpack("<HH", header[26:30])
+                if name_len != len(info.orig_filename.encode("utf-8")):
+                    continue
+                name = handle.read(name_len)
+                if name.decode("utf-8", "replace") != info.orig_filename:
+                    continue
+                if candidate != info.header_offset:
+                    info.header_offset = candidate
+                    repaired += 1
+                break
+            else:
+                raise zipfile.BadZipFile(
+                    f"could not locate a valid local header for {info.filename!r}. "
+                    "The archive is genuinely corrupt, not merely non-ZIP64 — "
+                    "re-download it."
+                )
+
+    # Python's overlapped-entry ("zip bomb") guard caches each member's end
+    # offset from the ORIGINAL ordering. Those bounds are stale once offsets
+    # move, and every extraction trips the guard. Recompute them from the
+    # repaired layout rather than switching the protection off.
+    ordered = sorted(zf.infolist(), key=lambda i: i.header_offset)
+    if ordered and hasattr(ordered[0], "_end_offset"):
+        for current, following in zip(ordered, ordered[1:], strict=False):
+            current._end_offset = following.header_offset  # noqa: SLF001
+        ordered[-1]._end_offset = size  # noqa: SLF001
+    return repaired
+
+
 def _extract(archive: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(archive):
         with zipfile.ZipFile(archive) as zf:
             _safe_zip_members(zf, dest)
+            repaired = repair_wrapped_offsets(zf, archive)
+            if repaired:
+                logger.warning(
+                    "archive is >4 GB without ZIP64: repaired %d wrapped member "
+                    "offset(s) before extracting",
+                    repaired,
+                )
             zf.extractall(dest)
     elif tarfile.is_tarfile(archive):
         with tarfile.open(archive) as tf:

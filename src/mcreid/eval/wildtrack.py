@@ -170,13 +170,31 @@ def _open_filestorage(xml_path: Path) -> cv2.FileStorage:
 
 
 def _read_fs_matrix(fs: cv2.FileStorage, keys: tuple[str, ...], xml_path: Path) -> FloatArray:
+    """Read a numeric node, whether it is a typed matrix or a bare sequence.
+
+    WILDTRACK mixes both styles: the intrinsics files use
+    ``type_id="opencv-matrix"`` nodes, while the extrinsics store rvec/tvec as
+    plain whitespace-separated sequences. Calling ``.mat()`` on the latter
+    raises an assertion inside OpenCV rather than returning None, so the
+    sequence form has to be read element by element.
+    """
     for key in keys:
         node = fs.getNode(key)
         if node.empty():
             continue
-        mat = node.mat()
-        if mat is not None and mat.size > 0:
+        if node.isSeq():
+            values = [float(node.at(i).real()) for i in range(node.size())]
+            if values:
+                return np.asarray(values, dtype=np.float64)
+            continue
+        try:
+            mat = node.mat()
+        except cv2.error:
+            mat = None
+        if mat is not None and np.asarray(mat).size > 0:
             return np.asarray(mat, dtype=np.float64)
+        if node.isReal():
+            return np.asarray([node.real()], dtype=np.float64)
     raise KeyError(f"{xml_path}: none of the expected keys {keys} found in this calibration XML")
 
 
