@@ -130,7 +130,7 @@ def find_clap(
 
 
 @app.command()
-def claps(
+def measure(
     footage: Path = typer.Option(..., help="Directory holding one video per camera."),
     out: Path = typer.Option(Path("calib/sync.json"), help="Where to write the offsets."),
     sample_rate: int = typer.Option(16000, help="Audio resample rate, Hz."),

@@ -68,6 +68,18 @@ def _fmt_metric(value: float | None) -> str:
     return f"{value:.3f}" if value is not None else "TODO: fill from paper"
 
 
+def _json_safe(values: dict[str, float | int]) -> dict[str, float | int | None]:
+    """Replace NaN floats with ``null`` -- plain ``json.dumps`` emits a bare
+    ``NaN`` token for them, which is not valid JSON and breaks strict parsers.
+    NaN legitimately shows up here (e.g. MODP/RMSE are undefined with zero
+    matches), so it is mapped to ``null`` rather than suppressed or faked.
+    """
+    return {
+        key: (None if isinstance(value, float) and np.isnan(value) else value)
+        for key, value in values.items()
+    }
+
+
 def _write_markdown_row(path: Path, metrics: MultiviewDetectionMetrics) -> None:
     """Write/append a markdown table row next to (TODO-guarded) published numbers."""
     header = "| Method | MODA | MODP | Precision | Recall |\n|---|---|---|---|---|\n"
@@ -219,15 +231,17 @@ def run(
         "method": _MARKDOWN_ROW_LABEL,
         "n_frames": len(frames),
         "match_radius_m": match_radius_m,
-        "detection": asdict(detection_metrics),
-        "identity": {
-            "n_gt_agents": identity_report.n_gt_agents,
-            "n_ids_issued": identity_report.n_ids_issued,
-            "total_id_switches": identity_report.total_id_switches,
-            "position_rmse_m": identity_report.position_rmse_m,
-            "mean_position_error_m": identity_report.mean_position_error_m,
-            "false_positive_tracks": identity_report.false_positive_tracks,
-        },
+        "detection": _json_safe(asdict(detection_metrics)),
+        "identity": _json_safe(
+            {
+                "n_gt_agents": identity_report.n_gt_agents,
+                "n_ids_issued": identity_report.n_ids_issued,
+                "total_id_switches": identity_report.total_id_switches,
+                "position_rmse_m": identity_report.position_rmse_m,
+                "mean_position_error_m": identity_report.mean_position_error_m,
+                "false_positive_tracks": identity_report.false_positive_tracks,
+            }
+        ),
     }
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result, indent=2), encoding="utf-8")

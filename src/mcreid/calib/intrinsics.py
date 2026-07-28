@@ -187,7 +187,9 @@ def collect_corners_from_video(
             if image_size is None:
                 image_size = size
             elif size != image_size:
-                raise ValueError(f"{video.name}: frame size changed mid-clip ({size} vs {image_size})")
+                raise ValueError(
+                    f"{video.name}: frame size changed mid-clip ({size} vs {image_size})"
+                )
 
             score = sharpness(image)
             if score < min_sharpness:

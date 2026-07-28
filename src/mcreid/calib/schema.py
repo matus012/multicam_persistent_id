@@ -13,7 +13,7 @@ World frame convention (LOCKED):
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -138,7 +138,10 @@ class GroundPlane(_Base):
         if self.floor_extent_m is not None:
             x0, y0, x1, y1 = self.floor_extent_m
             if not (x1 > x0 and y1 > y0):
-                raise ValueError(f"floor_extent_m must be (x_min, y_min, x_max, y_max), got {self.floor_extent_m}")
+                raise ValueError(
+                    "floor_extent_m must be (x_min, y_min, x_max, y_max), "
+                    f"got {self.floor_extent_m}"
+                )
         return self
 
     @property
@@ -193,7 +196,7 @@ class RigCalib(_Base):
     """N cameras sharing one world frame."""
 
     schema_version: int = SCHEMA_VERSION
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     world_notes: str = "Z=0 floor plane, metres, right-handed."
     cameras: list[CameraCalib] = Field(min_length=1)
 

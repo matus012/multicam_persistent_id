@@ -170,7 +170,7 @@ accuracy.
 Clip alignment for independently-started phones:
 
 ```bash
-uv run mcreid-sync claps --footage footage/take3
+uv run mcreid-sync --footage footage/take3
 ```
 
 ## Constraints and honesty notes
