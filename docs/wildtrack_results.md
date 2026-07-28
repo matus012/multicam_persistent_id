@@ -150,13 +150,75 @@ which is exactly the v2 decision anticipated in
 `scripts/README_v2_synthetic_engine.md`, now with a measured justification rather
 than an assumption.
 
-## 7. Not done yet
+## 7. Update — OSNet embedder, full 400-frame protocol
 
-- MODA/MODP under the standard multi-view detection protocol (`mcreid-eval`).
-  The loaders and metric are implemented and unit-tested; the protocol run over
-  all 400 frames has not been executed.
+The ImageNet trunk was replaced with **OSNet x1.0 trained for person ReID on
+MSMT17** (MIT licence, authors' weights, SHA-256 pinned). MSMT17 is a different
+domain from WILDTRACK, so the evaluation remains zero-shot. Nothing is trained
+by us; the ImageNet trunk stays selectable as an ablation.
+
+Cross-camera separation, re-measured on the same crops:
+
+| embedder | same person | different person | separation | best Youden gate |
+|---|---|---|---|---|
+| ImageNet ResNet-18 | 0.377 | 0.409 | 0.032 | 0.38 → 53 % / 38 % |
+| OSNet MSMT17 | 0.525 | 0.623 | **0.098** | 0.56 → 56 % / 20 % |
+
+At a tight gate the difference is stark: at 0.40 OSNet accepts 16.9 % of true
+pairs and only **0.5 %** of false ones, against 61 % / 47 % for ImageNet.
+
+### Full protocol, 400 frames, 7 cameras, 313 identities
+
+| configuration | MODA | MODP | precision | recall | ID switches | IDs reported |
+|---|---|---|---|---|---|---|
+| ImageNet trunk (no ReID) | −118.7 % | 64.2 % | 26.9 % | 69.3 % | 741 | 1000 |
+| OSNet, zero training by us | −118.8 % | 64.1 % | 26.9 % | 69.4 % | 636 | 943 |
+
+OSNet cuts ID switches by 14 % and reported identities by 6 %. It changes MODA,
+MODP, precision and recall by nothing, because those are dominated by duplicate
+detections rather than by identity confusion.
+
+### Root cause of the duplicates — the decisive measurement
+
+| same person, two cameras | GT boxes | detector boxes |
+|---|---|---|
+| mean disagreement | 0.12 m | **1.60 m** |
+| p50 | — | 0.49 m |
+| p90 | 0.21 m | **4.50 m** |
+| beyond 0.35 m | — | 64 % |
+| beyond 1.00 m (clustering radius) | 0 % | **31 %** |
+
+The homography is fine. The *input* to it is not: a detection box bottom edge is
+the ground-contact point only when the feet are visible, and in a crowd they are
+occluded by whoever stands in front, truncating the box high. A third of the same
+person's detections consequently land over a metre apart, beyond any clustering
+radius.
+
+Three interventions were tried and measured; all were essentially null, which is
+consistent with the geometry — not appearance — being the broken input:
+
+| intervention | MODA | ID switches |
+|---|---|---|
+| baseline (OSNet) | −1.188 | 636 |
+| unconditional geometric merge < 0.35 m | −1.168 | 680 |
+| appearance weight 0.6 → 0.2, cost ceiling raised | no change on the synthetic gate | — |
+
+The geometric merge is retained in the code but **disabled by default**, since
+the measurement did not support shipping it: it can only address the 36 % of
+duplicate pairs that fall inside its radius, and it made identity slightly worse.
+
+The fix is a better ground-contact estimate — inferring the foot point from box
+height and assumed stature under the known camera geometry, rather than trusting
+the bottom edge — and that is the top item for the next session.
+
+## 8. Not done yet
+
 - Published MVDet comparison numbers are deliberately left blank rather than
   recalled approximately.
+- A robust ground-contact estimator (see §7) — the single change most likely to
+  move MODA.
+- IDF1 proper. Identity is currently reported as switch counts and reported-ID
+  counts against ground truth, not as the IDF1 formulation.
 
 ## Reproduce
 

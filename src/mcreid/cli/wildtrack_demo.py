@@ -124,7 +124,7 @@ def render(
     # like it appeared from nowhere.
     subset = rig.model_copy(update={"cameras": [rig.get(c) for c in chosen]})
     manager = GlobalIDManager(subset, FusionConfig())
-    bev = BevRenderer(subset, canvas_size=(760, 760), grid_step_m=2.0)
+    bev = BevRenderer(subset, canvas_size=(760, 760), grid_step_m=2.0, trail_length=14)
     panel_size = (panel_w, int(panel_w * 9 / 16))
     dt = 1.0 / fps
 

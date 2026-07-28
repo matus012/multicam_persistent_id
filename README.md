@@ -10,8 +10,10 @@ and none of them has seen the evaluation data. The fusion is geometric.
 
 ![demo](docs/assets/wildtrack_demo.gif)
 
-*Three WILDTRACK cameras and the bird's-eye map. Watch one number and one colour
-follow a person from camera to camera — that agreement is the entire claim.*
+*Three WILDTRACK cameras and the bird's-eye map, real footage. Watch one number
+and one colour follow a person from camera to camera — that agreement is the
+entire claim. `[3cam]` on the map marks a track fused across three views;
+`occl` marks one being coasted through an occlusion.*
 
 ---
 
@@ -22,12 +24,52 @@ follow a person from camera to camera — that agreement is the entire claim.*
 7 static cameras over a public square, 400 annotated frames at 2 fps, 1920×1080.
 Nothing here is fine-tuned. Full write-up: [docs/wildtrack_results.md](docs/wildtrack_results.md).
 
-<!-- RESULTS_TABLE_START -->
-_Regenerate with `python scripts/make_results_table.py reports/wildtrack/eval_*/summary.json`_
-<!-- RESULTS_TABLE_END -->
+<!-- RESULTS_TABLE_START — regenerate with scripts/make_results_table.py -->
+| configuration | MODA | MODP | precision | recall | ID switches | IDs reported |
+|---|---|---|---|---|---|---|
+| geometric fusion + ImageNet trunk (no ReID) | −118.7 % | 64.2 % | 26.9 % | 69.3 % | 741 | 1000 |
+| geometric fusion + off-the-shelf ReID (zero training by us) | −118.8 % | 64.1 % | 26.9 % | 69.4 % | **636** | **943** |
+| MVDet (Hou et al.) — **trained on WILDTRACK** | _TODO: fill from paper_ | _TODO_ | _TODO_ | _TODO_ | n/a | n/a |
 
-MVDet is trained *on WILDTRACK*; this is zero-shot. The comparison is included
-for scale, not as a claim of parity.
+400 frames, 7 cameras, 313 ground-truth identities. Position RMSE 0.29 m for
+both. Runtime 7.7 FPS/camera, 1.10 FPS aggregate at 7×1080p on an RTX 4060
+Laptop (9.7 / 1.38 for the lighter ImageNet trunk).
+
+**MODA is strongly negative and that is the honest result.** MODA charges every
+false positive against the ground-truth count, and the system emits ~2.5× more
+ground-plane detections than there are people: 17910 false positives against
+6606 true. Recall is fine (69 %); precision is not (27 %).
+
+**The embedder swap does not fix it.** OSNet is 3× better separated than the
+ImageNet trunk and it buys a 14 % reduction in ID switches (741 → 636) and fewer
+identities (1000 → 943) — real, but confined to identity metrics. MODA, MODP,
+precision and recall are unchanged to three decimals, because they are dominated
+by duplicate detections, which is a *geometry* problem.
+
+MVDet is trained *on WILDTRACK*; this is zero-shot. Its numbers are left blank
+rather than recalled approximately — a fabricated benchmark figure next to real
+measurements is worse than a visible gap.
+
+### Why precision is bad — measured, not guessed
+
+The same person's position, as computed from two different cameras:
+
+| | ground-truth boxes | **detector boxes** |
+|---|---|---|
+| mean disagreement | 0.12 m | **1.60 m** |
+| p90 | 0.21 m | **4.50 m** |
+| beyond the 1.0 m clustering radius | 0 % | **31 %** |
+
+The projection maths is sound — with clean boxes, cameras agree to 12 cm. But a
+bounding box's bottom edge is only the ground-contact point when the feet are
+visible, and in a crowd they are routinely occluded, so the box is truncated at
+whoever is standing in front. A third of the same person's detections therefore
+land more than a metre apart and **no clustering radius can group them**.
+
+That is why neither appearance thresholds, nor cost weights, nor a
+geometry-only merge changed the outcome: the input geometry is the broken part.
+The fix is a better ground-contact estimate (e.g. inferring it from box height
+and known stature rather than the bottom edge), not a better embedder.
 
 ### The appearance model is the whole story
 
@@ -160,10 +202,11 @@ refuses to pass a calibration that does not reproduce it. See
 
 ## Honest limitations
 
-- **Crowds break identity.** On WILDTRACK the tracker under-merges: many people
-  are held as separate per-camera identities rather than one fused track. Even
-  with OSNet, a zero-shot embedder cannot reliably confirm that two views show
-  the same stranger among dozens of similar-looking people.
+- **Crowds break precision.** On WILDTRACK the tracker emits ~2.5× more
+  ground-plane detections than there are people, giving a strongly negative
+  MODA. The cause is measured above: occlusion-truncated detection boxes put the
+  same person more than a metre apart between cameras a third of the time. This
+  is the single biggest open problem in the project.
 - **Runtime is not real-time at 7×1080p.** Measured on an RTX 4060 Laptop; the
   numbers are in the results table and no target is claimed for that load.
   Detection dominates — per-view tracking plus fusion costs 1–2 ms/frame.

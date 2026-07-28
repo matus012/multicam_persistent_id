@@ -40,11 +40,15 @@ class BevRenderer:
         margin_m: float = 0.4,
         trail_length: int = 45,
         grid_step_m: float = 1.0,
+        max_labelled_tracks: int = 12,
     ) -> None:
         self.rig = rig
         self.canvas_size = canvas_size
         self.trail_length = trail_length
         self.grid_step_m = grid_step_m
+        self.max_labelled_tracks = max_labelled_tracks
+        """Above this many live tracks the map is too dense to label everything;
+        labelling is reduced to the tracks that carry information."""
 
         x0, y0, x1, y1 = rig.floor_extent()
         self.extent = (x0 - margin_m, y0 - margin_m, x1 + margin_m, y1 + margin_m)
@@ -152,17 +156,25 @@ class BevRenderer:
                     canvas, px, self.to_pixels(tip), colour, 2, cv2.LINE_AA, tipLength=0.3
                 )
 
-            label = f"ID {snap.global_id}"
+            # In a crowd, per-track annotations overlap into an unreadable mat.
+            # Above the threshold, label only what the viewer needs: the ID, and
+            # a marker for tracks that are fused across cameras or coasting.
+            crowded = len(snapshots) > self.max_labelled_tracks
+            if crowded and not coasting and len(snap.supporting_cameras) < 2:
+                continue
+            label = str(snap.global_id)
             if coasting:
-                label += f"  occluded {snap.frames_since_measurement}f"
-            elif snap.supporting_cameras:
-                label += f"  [{len(snap.supporting_cameras)} cam]"
+                label += f" occl {snap.frames_since_measurement}f"
+            elif len(snap.supporting_cameras) >= 2:
+                label += f" [{len(snap.supporting_cameras)}cam]"
+            elif not crowded:
+                label += " [1cam]"
             cv2.putText(
                 canvas,
                 label,
                 (px[0] + 13, px[1] - 9),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
+                0.46,
                 colour,
                 2 if not coasting else 1,
                 cv2.LINE_AA,

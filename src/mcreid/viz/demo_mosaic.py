@@ -39,39 +39,45 @@ def draw_demo_view(
     line weights and text stay proportional instead of turning into mush.
     """
     canvas = frame.copy()
-    target_w, target_h = panel_size
+    target_w, _target_h = panel_size
     scale = target_w / canvas.shape[1]
-    # Compensate so that, after downscaling, strokes land at a readable size.
     thickness = max(int(round(3 / scale)), 2)
-    font_scale = 1.1 / scale
 
-    for obs in observations:
+    # Draw far boxes first so near ones (and their labels) land on top.
+    ordered = sorted(observations, key=lambda o: float(o.bbox_xyxy[3]))
+    for obs in ordered:
         gid = global_ids.get(obs.local_track_id)
         box = np.asarray(obs.bbox_xyxy, dtype=np.float64)
         p0 = (int(box[0]), int(box[1]))
         p1 = (int(box[2]), int(box[3]))
+        box_h = box[3] - box[1]
         if gid is None:
             cv2.rectangle(canvas, p0, p1, (120, 120, 120), max(thickness // 2, 1))
             continue
 
         colour = id_color(gid)
-        emphasis = thickness + 3 if gid == highlight else thickness
+        emphasis = thickness + 4 if gid == highlight else thickness
         cv2.rectangle(canvas, p0, p1, colour, emphasis)
 
+        # Label size follows the box. A fixed size turns a distant crowd into a
+        # solid band of overlapping chips that hides the very people the demo is
+        # meant to show, and tiny boxes get no label at all rather than a chip
+        # several times their own width.
+        min_label_h = 46 / scale
+        if box_h < min_label_h and gid != highlight:
+            continue
+        font_scale = float(np.clip(box_h / (150 / scale), 0.5, 1.3)) / scale
         label = str(gid)
         (tw, th), _ = cv2.getTextSize(label, _FONT, font_scale, thickness)
-        top = max(p0[1] - th - int(14 / scale), 0)
+        pad = int(6 / scale)
+        top = max(p0[1] - th - 2 * pad, 0)
         cv2.rectangle(
-            canvas,
-            (p0[0], top),
-            (p0[0] + tw + int(16 / scale), top + th + int(14 / scale)),
-            colour,
-            -1,
+            canvas, (p0[0], top), (p0[0] + tw + 2 * pad, top + th + 2 * pad), colour, -1
         )
         cv2.putText(
             canvas,
             label,
-            (p0[0] + int(8 / scale), top + th + int(4 / scale)),
+            (p0[0] + pad, top + th + pad),
             _FONT,
             font_scale,
             (0, 0, 0),
@@ -172,6 +178,20 @@ def find_handoff_segments(
             scored.append((score, start, end, gid))
 
     scored.sort(reverse=True)
+    # Rank by whether a viewer can actually follow the ID: handoff events matter,
+    # but an ID that is only ever supported by one camera at a time is invisible
+    # as a demonstration of cross-camera agreement.
+    def _followability(item: tuple[int, int, int, int]) -> tuple[int, int]:
+        _score, start, end, gid = item
+        multi = sum(
+            1
+            for f in range(start, end)
+            for s in snapshots_per_frame[f]
+            if s.global_id == gid and len(s.supporting_cameras) >= 2
+        )
+        return (multi, _score)
+
+    scored.sort(key=_followability, reverse=True)
     deduped: list[tuple[int, int, int, int]] = []
     for item in scored:
         if all(abs(item[1] - kept[1]) >= min_length // 2 for kept in deduped):

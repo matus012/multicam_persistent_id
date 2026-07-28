@@ -99,6 +99,23 @@ class FusionConfig:
     one-to-one, so when two cameras match an existing track and two do not, the
     leftovers legitimately birth a second track on top of the first. Both then
     survive, and every frame the reported identity flips between them."""
+    merge_unconditional_radius_m: float = 0.0
+    """Below this separation, merge two live tracks on geometry alone, without an
+    appearance vote. **Disabled by default — measured null result.**
+
+    The reasoning was sound: two different people cannot occupy the same 35 cm of
+    floor, so within that radius appearance carries no information. It does not
+    help, because the premise is wrong about where the duplicates actually are.
+    Measured on WILDTRACK, the cross-camera disagreement for one person is 0.12 m
+    using ground-truth boxes but **1.60 m mean / 4.50 m p90 using detector
+    boxes** — 64% of duplicate pairs sit beyond 0.35 m and 37% beyond the merge
+    radius entirely. At 0.35 m this fired rarely: MODA moved -1.188 -> -1.168
+    while ID switches got worse (636 -> 680).
+
+    Kept because it is correct for well-localised inputs (it is a real effect on
+    the synthetic scenes and would matter on a small room with unoccluded feet),
+    but off by default rather than shipped on the strength of an argument that
+    the measurement did not support."""
     merge_appearance_distance: float = 0.48
     """EMA-to-EMA cosine distance ceiling for a merge. Two co-located tracks of
     one person must clear this; two different people walking past each other
@@ -732,9 +749,21 @@ class GlobalIDManager:
             for other in live[i + 1 :]:
                 if other.global_id in absorbed:
                     continue
-                if float(np.linalg.norm(keep.world_xy - other.world_xy)) > (
-                    self.config.merge_radius_m
-                ):
+                separation = float(np.linalg.norm(keep.world_xy - other.world_xy))
+                if separation > self.config.merge_radius_m:
+                    continue
+                # Too close to be two people: geometry decides, appearance abstains.
+                if separation <= self.config.merge_unconditional_radius_m:
+                    logger.debug(
+                        "frame %d: merged id %d into %d on geometry alone (%.2f m)",
+                        frame,
+                        other.global_id,
+                        keep.global_id,
+                        separation,
+                    )
+                    keep.absorb(other)
+                    self._remap_assignment(other.global_id, keep.global_id)
+                    absorbed.add(other.global_id)
                     continue
                 keep_ema, other_ema = keep.gallery.ema, other.gallery.ema
                 if keep_ema is None or other_ema is None:
