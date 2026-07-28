@@ -1,4 +1,4 @@
-# --- Python ---
+# --- Python (match at any depth) ---
 __pycache__/
 *.py[cod]
 *.so
@@ -22,8 +22,11 @@ coverage.xml
 htmlcov/
 
 # --- ML / data / weights (NEVER commit) ---
-data/
-weights/
+# Root-anchored on purpose. An unanchored `calib/` silently ignored the
+# src/mcreid/calib source package, so the core calibration module never made it
+# into a commit while every local test still passed. Anchor output directories.
+/data/
+/weights/
 *.pt
 *.pth
 *.onnx
@@ -32,8 +35,8 @@ weights/
 *.npz
 
 # --- footage & recordings ---
-footage/
-recordings/
+/footage/
+/recordings/
 *.mp4
 *.mov
 *.avi
@@ -41,15 +44,15 @@ recordings/
 *.gif
 !docs/assets/*.gif
 
-# --- calibration from my room (personal) ---
-calib/
+# --- calibration produced from my room (personal) ---
+/calib/
 *.calib.json
 
 # --- outputs ---
-outputs/
-logs/
-results/
-runs/
+/outputs/
+/logs/
+/results/
+/runs/
 *.log
 
 # --- editors / OS ---
