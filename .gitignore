@@ -1,0 +1,59 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# --- envs ---
+.venv/
+.venv-*/
+env/
+venv/
+
+# --- tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- ML / data / weights (NEVER commit) ---
+data/
+weights/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.npy
+*.npz
+
+# --- footage & recordings ---
+footage/
+recordings/
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.gif
+!docs/assets/*.gif
+
+# --- calibration from my room (personal) ---
+calib/
+*.calib.json
+
+# --- outputs ---
+outputs/
+logs/
+results/
+runs/
+*.log
+
+# --- editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcreid"
+version = "0.1.0"
+description = "M1 — multi-camera persistent-ID tracking with live BEV map (late-fusion, zero-training v1)"
+requires-python = ">=3.11,<3.12"
+license = { text = "AGPL-3.0-only" }
+
+# Core: everything needed for calibration, fusion, toy sequences, tests.
+# Deliberately torch-free so G-M1-1 (calib + association + ID consistency) runs in CI on CPU.
+dependencies = [
+    "numpy==2.1.3",
+    "scipy==1.14.1",
+    "opencv-contrib-python==4.10.0.84",
+    "pydantic==2.9.2",
+    "pyyaml==6.0.2",
+    "typer==0.12.5",
+    "rich==13.9.4",
+    "tqdm==4.67.1",
+]
+
+[project.optional-dependencies]
+# Perception stack (GPU). Installed separately with the cu126 index.
+# Versions mirror the P1 repo (100_occlusion_mot), which is verified working on
+# this machine's driver 581.86 / CUDA 12.6.
+perception = [
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "ultralytics==8.4.104",
+]
+dev = [
+    "pytest==8.3.4",
+    "pytest-cov==6.0.0",
+    "ruff==0.8.4",
+    "mypy==1.13.0",
+    "types-PyYAML==6.0.12.20240917",
+    "imageio==2.36.1",
+]
+
+[project.scripts]
+mcreid-calibrate = "mcreid.cli.calibrate:app"
+mcreid-demo = "mcreid.cli.demo:app"
+mcreid-sync = "mcreid.cli.sync:app"
+mcreid-eval = "mcreid.cli.eval_wildtrack:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["data", "logs", "results", "weights", "outputs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ANN", "SIM"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN201", "ANN001"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = false
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "gpu: requires CUDA + perception extras (deselect with -m 'not gpu')",
+    "footage: requires recorded footage not present in CI",
+]
