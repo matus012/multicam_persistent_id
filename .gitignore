@@ -53,6 +53,8 @@ htmlcov/
 /logs/
 /results/
 /runs/
+# Calibration reports embed frames of my room — same class as footage.
+/reports/
 *.log
 
 # --- editors / OS ---

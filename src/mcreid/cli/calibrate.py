@@ -36,8 +36,16 @@ from mcreid.calib.intrinsics import (
     calibrate_intrinsics_from_video,
     sharpness,
 )
+from mcreid.calib.report import (
+    DEFAULT_MAX_FIT_RESIDUAL_M,
+    DEFAULT_MAX_LOO_ERROR_M,
+    CameraReport,
+    RigReport,
+    analyse_camera,
+)
 from mcreid.calib.schema import CameraCalib, RigCalib
 from mcreid.utils.logging import get_logger, setup_logging
+from mcreid.viz.calib_overlay import draw_floor_grid, draw_tag_reprojection
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False, help="Camera calibration for the multi-view rig.")
@@ -259,6 +267,110 @@ def rig(
     typer.echo(f"\nwrote {path} ({len(cameras)}/{len(camera_dirs)} cameras)")
     if failures:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def report(
+    calib: Path = typer.Option(..., help="calib.json produced by `mcreid-calibrate rig`."),
+    capture_dir: Path = typer.Option(..., help="Capture directory holding the tag frames."),
+    tags: Path = typer.Option(None, help="tags.yaml. Defaults to <capture_dir>/tags.yaml."),
+    out_dir: Path = typer.Option(Path("reports/calib"), help="Where to write the report."),
+    grid_step_m: float = typer.Option(0.5, help="Floor grid spacing in the overlays."),
+    max_loo_error_m: float = typer.Option(
+        DEFAULT_MAX_LOO_ERROR_M, help="Leave-one-out error limit, metres."
+    ),
+    max_fit_residual_m: float = typer.Option(
+        DEFAULT_MAX_FIT_RESIDUAL_M, help="Ground-plane fit residual limit, metres."
+    ),
+    log_level: str = typer.Option("INFO"),
+) -> None:
+    """Calibration sanity check. RUN THIS BEFORE ANY TRACKING ON REAL FOOTAGE.
+
+    For every camera: reprojects the AprilTags, renders a metric floor grid into
+    the image, and validates the ground homography by leave-one-out. Writes
+    annotated PNGs plus a markdown/JSON summary, and exits non-zero with
+    specific re-measure/re-shoot instructions if anything fails.
+    """
+    setup_logging(log_level)
+    rig_calib = RigCalib.load(calib)
+    placements = load_tag_placements(tags or capture_dir / "tags.yaml")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    reports: list[CameraReport] = []
+    for cam in rig_calib.cameras:
+        try:
+            frame_path = find_ground_frame(capture_dir, cam.camera_id)
+            image = read_frame(frame_path)
+        except (FileNotFoundError, OSError) as exc:
+            typer.echo(f"  {cam.camera_id}: {exc}")
+            reports.append(
+                CameraReport(
+                    camera_id=cam.camera_id,
+                    n_tags_detected=0,
+                    n_tags_expected=len(placements),
+                    missing_tag_ids=[p.tag_id for p in placements],
+                    fit_residual_m=float("nan"),
+                    loo_error_mean_m=float("nan"),
+                    loo_error_max_m=float("nan"),
+                    reprojection_px_mean=float("nan"),
+                    reprojection_px_max=float("nan"),
+                    floor_coverage=float("nan"),
+                    grid_is_convex=False,
+                    problems=[str(exc)],
+                )
+            )
+            continue
+
+        camera_report, detections = analyse_camera(
+            cam,
+            image,
+            placements,
+            max_loo_error_m=max_loo_error_m,
+            max_fit_residual_m=max_fit_residual_m,
+        )
+        reports.append(camera_report)
+
+        cv2.imwrite(
+            str(out_dir / f"{cam.camera_id}_grid.png"),
+            draw_floor_grid(image, cam, step_m=grid_step_m),
+        )
+        cv2.imwrite(
+            str(out_dir / f"{cam.camera_id}_tags.png"),
+            draw_tag_reprojection(image, cam, detections, placements),
+        )
+        status = "OK" if camera_report.ok else "FAIL"
+        typer.echo(
+            f"  [{status}] {cam.camera_id}: {camera_report.n_tags_detected}"
+            f"/{camera_report.n_tags_expected} tags, "
+            f"LOO {camera_report.loo_error_mean_m * 100:.1f} cm, "
+            f"fit {camera_report.fit_residual_m * 100:.1f} cm, "
+            f"floor coverage {camera_report.floor_coverage:.0%}"
+        )
+
+    rig_report = RigReport(
+        cameras=reports,
+        max_loo_error_m=max_loo_error_m,
+        max_fit_residual_m=max_fit_residual_m,
+    )
+    rig_report.to_json(out_dir / "summary.json")
+    markdown = rig_report.to_markdown(out_dir / "summary.md")
+    typer.echo(f"\nwrote overlays and {markdown}")
+
+    if not rig_report.ok:
+        typer.echo("\n" + "=" * 72)
+        typer.echo("CALIBRATION CHECK FAILED — do not run tracking on this footage yet.")
+        typer.echo("=" * 72)
+        for cam_report in rig_report.failed:
+            typer.echo(f"\n{cam_report.camera_id}:")
+            for problem in cam_report.problems:
+                typer.echo(f"  - {problem}")
+        typer.echo(
+            f"\nLook at {out_dir}/<cam>_grid.png: the grid must lie flat on the floor.\n"
+            f"Look at {out_dir}/<cam>_tags.png: green and red outlines must coincide."
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo("\nCalibration check PASSED for every camera. Safe to run tracking.")
 
 
 @app.command()
