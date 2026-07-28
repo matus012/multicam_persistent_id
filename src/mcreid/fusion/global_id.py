@@ -32,6 +32,7 @@ from mcreid.fusion.associate import (
     build_cost_matrix,
     linear_assignment,
 )
+from mcreid.fusion.dormant import DormantConfig, DormantGallery
 from mcreid.fusion.motion import GroundKalman
 from mcreid.fusion.types import (
     GlobalTrackSnapshot,
@@ -54,6 +55,10 @@ class FusionConfig:
     """Lifecycle + fusion parameters. One place, no scattered magic numbers."""
 
     association: AssociationConfig = field(default_factory=AssociationConfig)
+    dormant: DormantConfig = field(default_factory=DormantConfig)
+    """Long-gap re-identification. Tracks past the revive window are demoted into
+    an appearance-only gallery rather than deleted, so someone who leaves the
+    room and returns minutes later keeps their global ID."""
 
     # --- lifecycle ---
     n_init: int = 3
@@ -181,6 +186,14 @@ class FusionConfig:
             raise ValueError(
                 "revive_appearance_distance must be <= association.max_appearance_distance"
             )
+        if self.dormant.enabled and self.dormant.appearance_distance > (
+            self.revive_appearance_distance
+        ):
+            raise ValueError(
+                f"dormant.appearance_distance ({self.dormant.appearance_distance}) must be "
+                f"<= revive_appearance_distance ({self.revive_appearance_distance}): the "
+                "dormant path has no motion gate, so it cannot be the more permissive one"
+            )
 
 
 class GlobalTrack:
@@ -206,6 +219,7 @@ class GlobalTrack:
         self.last_measured_frame = frame
         self.last_measured_xy = mean[:2].copy()
         self.supporting_cameras: tuple[str, ...] = ()
+        self.ever_confirmed = False
         self._config = config
 
     # --- properties -------------------------------------------------------
@@ -260,6 +274,7 @@ class GlobalTrack:
         promoted = self.state is TrackState.TENTATIVE and self.hits >= self._config.n_init
         if recovered or promoted:
             self.state = TrackState.CONFIRMED
+            self.ever_confirmed = True
 
     def mark_missed(self) -> None:
         """No measurement this frame — advance the lifecycle."""
@@ -364,6 +379,7 @@ class GlobalIDManager:
             max_speed_mps=self.config.max_speed_mps,
         )
         self.tracks: list[GlobalTrack] = []
+        self.dormant = DormantGallery(self.config.dormant)
         self._ids_issued = 0
         self._frame = -1
         self._last_dt = 1.0 / 30.0
@@ -479,13 +495,27 @@ class GlobalIDManager:
             else:
                 track.mark_missed()
 
+        # A person reappearing after a long absence is usually confirmed by one
+        # camera a frame or two before the others. That first single-camera
+        # sighting is too noisy to clear the strict dormant gate, so it births a
+        # candidate identity, and by the time the cleaner multi-camera cluster
+        # resurrects the real ID there are two tracks on one person. Testing
+        # still-tentative candidates against the gallery each frame catches the
+        # identity while it is still a candidate — before it can become a rival.
+        self._adopt_dormant_identity(frame)
+
         clusters = self._cluster(leftovers)
         remaining = self._revive(clusters, frame)
+        # Long-gap re-identification is the last thing tried before a new global
+        # ID is minted: motion-gated revival first, then appearance-only lookup.
+        remaining = self._resurrect(remaining, frame)
+        remaining = self._attach_to_existing(remaining, frame)
         for cluster in remaining:
             self._birth(cluster, frame)
 
         self._merge_duplicates(frame)
-        self.tracks = [t for t in self.tracks if t.state is not TrackState.DEAD]
+        self._retire_dead(frame)
+        self.dormant.expire(frame, dt)
         return [t.snapshot(frame) for t in self.tracks if t.is_visible]
 
     # --- internals --------------------------------------------------------
@@ -665,7 +695,26 @@ class GlobalIDManager:
                 keep_ema, other_ema = keep.gallery.ema, other.gallery.ema
                 if keep_ema is None or other_ema is None:
                     continue
-                if float(1.0 - keep_ema @ other_ema) > max_app:
+                # Two tracks that are BOTH being measured this frame, by
+                # *disjoint* camera sets, less than merge_radius apart, are the
+                # duplicate-birth signature: one person whose cameras split
+                # across two identities. That is much stronger evidence than
+                # mere co-location, so the association-level gate applies.
+                # Two genuinely different people standing close are normally
+                # both seen by overlapping cameras, and a coasting track has no
+                # support at all — both of those keep the strict gate, which is
+                # what protects a coasting identity from being absorbed.
+                disjoint_live_support = (
+                    bool(keep.supporting_cameras)
+                    and bool(other.supporting_cameras)
+                    and not (set(keep.supporting_cameras) & set(other.supporting_cameras))
+                )
+                threshold = (
+                    self.config.association.max_appearance_distance
+                    if disjoint_live_support
+                    else max_app
+                )
+                if float(1.0 - keep_ema @ other_ema) > threshold:
                     continue
                 logger.debug(
                     "frame %d: merged duplicate global id %d into %d (%.2f m apart)",
@@ -697,6 +746,195 @@ class GlobalIDManager:
         for key, value in self.last_assignment.items():
             if value == old_id:
                 self.last_assignment[key] = new_id
+
+    def _resurrect(self, clusters: list[_Cluster], frame: int) -> list[_Cluster]:
+        """Re-attach clusters to dormant identities. Returns the unmatched rest.
+
+        This is the long-gap path: the target left every camera minutes ago, so
+        there is no motion prior to lean on and appearance decides alone. See
+        `mcreid.fusion.dormant` for why it is stricter than live revival.
+        """
+        if not clusters or not len(self.dormant):
+            return clusters
+
+        queries = np.stack([c.embedding for c in clusters])
+        matches = self.dormant.match(queries)
+        if not matches:
+            return clusters
+
+        resurrected: set[int] = set()
+        for cluster_index, global_id, distance in matches:
+            cluster = clusters[cluster_index]
+            entry = self.dormant.pop(global_id)
+            mean, cov = self.kf.initiate(cluster.world_xy, cluster.observations[0].world_cov)
+            track = GlobalTrack(
+                global_id=global_id, frame=frame, mean=mean, cov=cov, config=self.config
+            )
+            # Seed with the stored appearance so the identity keeps its history
+            # rather than starting over from this single sighting. `seed` rather
+            # than `add`: the stored vectors must not drag the EMA away from what
+            # the person looks like right now.
+            track.gallery.seed("_dormant", entry.embeddings)
+            track.hits = self.config.n_init  # it is a known identity, not a candidate
+            track.update(self.kf, cluster.observations, frame)
+            self._record_assignment(cluster, global_id)
+            self.tracks.append(track)
+            resurrected.add(cluster_index)
+            logger.info(
+                "frame %d: RESURRECTED global id %d from the dormant gallery after "
+                "%d frames (appearance distance %.3f, cameras %s)",
+                frame,
+                global_id,
+                frame - entry.retired_frame,
+                distance,
+                track.supporting_cameras,
+            )
+        return [c for i, c in enumerate(clusters) if i not in resurrected]
+
+    def _attach_to_existing(self, clusters: list[_Cluster], frame: int) -> list[_Cluster]:
+        """Fold a leftover cluster into a co-located compatible track, if any.
+
+        Cameras confirm a reappearing person on slightly different frames, so the
+        first one or two to confirm claim the identity and the rest arrive a frame
+        later as an unassociated cluster. `_merge_duplicates` does eventually
+        collapse the resulting twin, but only after both have confirmed, and the
+        reported identity flickers in between. Attaching before birth removes the
+        flicker instead of repairing it.
+        """
+        if not clusters:
+            return clusters
+        live = [t for t in self.tracks if t.is_active]
+        if not live:
+            return clusters
+
+        attached: set[int] = set()
+        for index, cluster in enumerate(clusters):
+            best: GlobalTrack | None = None
+            best_distance = np.inf
+            for track in live:
+                if set(cluster.cameras) & set(track.supporting_cameras):
+                    continue  # that camera already fed this track this frame
+                gap = float(np.linalg.norm(track.world_xy - cluster.world_xy))
+                if gap > self.config.merge_radius_m or gap >= best_distance:
+                    continue
+                # This is an association decision, not a merge: the cluster is
+                # co-located with the track and comes from cameras the track has
+                # not been fed by this frame. The strict merge gate is wrong here
+                # — and would fail exactly when it is needed, because a person
+                # who has just reappeared has one noisy observation per camera
+                # and their cross-camera embedding spread is at its widest.
+                appearance = float(
+                    track.gallery.robust_distance(
+                        cluster.embedding[None, :], top_k=self.config.revive_gallery_top_k
+                    )[0]
+                )
+                if appearance > self.config.association.max_appearance_distance:
+                    continue
+                best, best_distance = track, gap
+            if best is None:
+                if logger.isEnabledFor(10):  # DEBUG
+                    for track in live:
+                        gap = float(np.linalg.norm(track.world_xy - cluster.world_xy))
+                        appearance = float(
+                            track.gallery.robust_distance(
+                                cluster.embedding[None, :],
+                                top_k=self.config.revive_gallery_top_k,
+                            )[0]
+                        )
+                        logger.debug(
+                            "frame %d: cluster %s NOT attached to id %d — gap %.2f m "
+                            "(limit %.2f), appearance %.3f (limit %.2f), track cams %s",
+                            frame,
+                            sorted(cluster.cameras),
+                            track.global_id,
+                            gap,
+                            self.config.merge_radius_m,
+                            appearance,
+                            self.config.association.max_appearance_distance,
+                            track.supporting_cameras,
+                        )
+                continue
+            best.update(self.kf, cluster.observations, frame)
+            self._record_assignment(cluster, best.global_id)
+            attached.add(index)
+            logger.debug(
+                "frame %d: attached a leftover cluster to existing global id %d "
+                "(%.2f m) instead of minting a new one",
+                frame,
+                best.global_id,
+                best_distance,
+            )
+        return [c for i, c in enumerate(clusters) if i not in attached]
+
+    def _adopt_dormant_identity(self, frame: int) -> None:
+        """Let still-tentative tracks reclaim a dormant identity.
+
+        A tentative track has never been reported, so adopting an older global ID
+        here is invisible downstream — no ID switch is observable, because the
+        candidate ID was never shown to anyone. Doing this *before* the track can
+        confirm is what stops a reappearance from producing two rival identities
+        for the same person.
+        """
+        if not len(self.dormant):
+            return
+        candidates = [
+            t
+            for t in self.tracks
+            if t.state is TrackState.TENTATIVE and t.hits >= 2 and len(t.gallery) > 0
+        ]
+        if not candidates:
+            return
+
+        queries = []
+        usable: list[GlobalTrack] = []
+        for track in candidates:
+            ema = track.gallery.ema
+            if ema is None:
+                continue
+            queries.append(ema)
+            usable.append(track)
+        if not usable:
+            return
+
+        for index, global_id, distance in self.dormant.match(np.stack(queries)):
+            track = usable[index]
+            entry = self.dormant.pop(global_id)
+            old_id = track.global_id
+            track.global_id = global_id
+            track.gallery.seed("_dormant", entry.embeddings)
+            track.hits = max(track.hits, self.config.n_init)
+            track.state = TrackState.CONFIRMED
+            track.ever_confirmed = True
+            self._remap_assignment(old_id, global_id)
+            logger.info(
+                "frame %d: candidate track (was id %d) ADOPTED dormant global id %d "
+                "after %d frames (appearance distance %.3f)",
+                frame,
+                old_id,
+                global_id,
+                frame - entry.retired_frame,
+                distance,
+            )
+
+    def _retire_dead(self, frame: int) -> None:
+        """Demote dead-but-real identities into the dormant gallery, then drop them."""
+        survivors: list[GlobalTrack] = []
+        for track in self.tracks:
+            if track.state is not TrackState.DEAD:
+                survivors.append(track)
+                continue
+            # A track that never confirmed was a false positive; storing it would
+            # let a hallucination reclaim an identity later.
+            if track.ever_confirmed:
+                self.dormant.admit(
+                    global_id=track.global_id,
+                    vectors=[vector for _cam, vector in track.gallery.items()],
+                    frame=frame,
+                    hits=track.hits,
+                    cameras_seen=track.gallery.cameras,
+                    last_world_xy=track.last_measured_xy,
+                )
+        self.tracks = survivors
 
     def _birth(self, cluster: _Cluster, frame: int) -> None:
         first = cluster.observations[0]

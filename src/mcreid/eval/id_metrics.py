@@ -100,16 +100,32 @@ def _match_frame(
     gt_positions: dict[int, FloatArray],
     snapshots: list[GlobalTrackSnapshot],
     match_radius_m: float,
+    hidden_agents: set[int] | None = None,
 ) -> dict[int, int]:
-    """Hungarian-match ground-truth agents to global tracks. Returns {agent: gid}."""
+    """Hungarian-match ground-truth agents to global tracks. Returns {agent: gid}.
+
+    ``hidden_agents`` are agents no camera can see this frame. They may only be
+    matched to a track that is itself *coasting*: a track being actively measured
+    is demonstrably following somebody the cameras can see, so it cannot also be
+    following someone invisible. Without this rule a hidden agent who happens to
+    walk past a stranger's track gets credited to it, which shows up as a
+    spurious ID switch that no tracker behaviour caused.
+    """
     if not gt_positions or not snapshots:
         return {}
 
+    hidden = hidden_agents or set()
     agents = sorted(gt_positions)
     gt = np.stack([gt_positions[a] for a in agents])
     pred = np.stack([s.world_xy for s in snapshots])
     distance = np.linalg.norm(gt[:, None, :] - pred[None, :, :], axis=2)
     cost = np.where(distance <= match_radius_m, distance, 1e5)
+
+    measured = np.array([not s.is_coasting for s in snapshots], dtype=bool)
+    for row, agent in enumerate(agents):
+        if agent in hidden:
+            cost[row, measured] = 1e5
+            distance[row, measured] = np.inf
 
     rows, cols = linear_sum_assignment(cost)
     return {
@@ -246,7 +262,12 @@ def evaluate_id_consistency(
             if np.isfinite(gt_world[a][frame]).all()
         }
         snapshots = results[frame]
-        assignment = _match_frame(gt_positions, snapshots, match_radius_m)
+        hidden_agents = {
+            a
+            for a in gt_positions
+            if a in gt_visible and not bool(gt_visible[a][frame].any())
+        }
+        assignment = _match_frame(gt_positions, snapshots, match_radius_m, hidden_agents)
         per_frame.append(assignment)
         matched_gids.update(assignment.values())
 

@@ -4,6 +4,7 @@ from mcreid.sim.toy import (
     AgentSpec,
     NoiseSpec,
     OcclusionEvent,
+    StaticFalsePositive,
     ToyDetection,
     ToyScene,
     ToySceneConfig,
@@ -11,6 +12,7 @@ from mcreid.sim.toy import (
     cardboard_scene,
     crossing_scene,
     generate_scene,
+    long_gap_scene,
 )
 from mcreid.sim.virtual_camera import VirtualCamera
 
@@ -18,6 +20,7 @@ __all__ = [
     "AgentSpec",
     "NoiseSpec",
     "OcclusionEvent",
+    "StaticFalsePositive",
     "ToyDetection",
     "ToyScene",
     "ToySceneConfig",
@@ -26,4 +29,5 @@ __all__ = [
     "cardboard_scene",
     "crossing_scene",
     "generate_scene",
+    "long_gap_scene",
 ]

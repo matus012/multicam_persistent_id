@@ -70,6 +70,24 @@ class AppearanceGallery:
             blended = self.ema_alpha * self._ema + (1.0 - self.ema_alpha) * emb
             self._ema = blended / np.linalg.norm(blended)
 
+    def seed(self, camera_id: str, embeddings: npt.ArrayLike) -> None:
+        """Add historical vectors for matching breadth WITHOUT moving the EMA.
+
+        Used when a resurrected identity inherits its stored appearance. Those
+        stored vectors are deliberately diverse — they exist to match the person
+        from any past viewpoint — so blending them into the EMA would leave it
+        resembling no actual observation. The EMA must keep meaning "what this
+        person looks like right now", so it is left for the first live
+        observation to set.
+        """
+        data = np.atleast_2d(np.asarray(embeddings, dtype=np.float64))
+        bank = self._banks.setdefault(camera_id, deque(maxlen=self.per_camera))
+        for vector in data:
+            norm = float(np.linalg.norm(vector))
+            if norm < 1e-12:
+                raise ValueError("cannot seed a zero embedding")
+            bank.append(vector / norm)
+
     def items(self) -> list[tuple[str, FloatArray]]:
         """(camera_id, embedding) pairs for every stored vector — used when one
         track absorbs a duplicate and inherits its appearance evidence."""

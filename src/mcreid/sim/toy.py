@@ -557,6 +557,83 @@ def cardboard_scene(
     )
 
 
+def long_gap_scene(
+    gap_s: float = 75.0,
+    lead_s: float = 6.0,
+    tail_s: float = 6.0,
+    fps: float = 30.0,
+    seed: int = DEFAULT_SEED,
+    room: tuple[float, float] = (6.0, 5.0),
+    intruder: bool = False,
+) -> ToySceneConfig:
+    """Long-gap re-identification: the hero leaves every camera for ``gap_s``.
+
+    This is the case the motion-gated revival path cannot serve. After the revive
+    window the identity is demoted to the dormant gallery with no position claim,
+    and on return it must be recovered by appearance alone. The hero keeps
+    walking while unobserved, so on reappearance they are somewhere else entirely
+    — a position prior would be actively misleading here.
+
+    ``intruder=True`` is the adversarial variant: a *different* person is present
+    only during the gap, and must be given their own new global ID rather than
+    inheriting the dormant one. A dormant gallery that cannot refuse is worse
+    than no dormant gallery, because it launders an identity swap into a
+    confident-looking track.
+    """
+    cams = bedroom_rig(room=room)
+    width, depth = room
+
+    def f(seconds: float) -> int:
+        return int(round(seconds * fps))
+
+    lead, gap, tail = f(lead_s), f(gap_s), f(tail_s)
+    n_frames = lead + gap + tail
+    gap_start, gap_end = lead, lead + gap
+
+    hero = AgentSpec(
+        agent_id=1,
+        waypoints_m=(
+            (1.2, 1.2),
+            (width - 1.2, 1.4),
+            (width - 1.4, depth - 1.2),
+            (1.4, depth - 1.4),
+        ),
+        speed_mps=1.1,
+    )
+    events = [
+        OcclusionEvent(1, gap_start, gap_end, None, label=f"hero out of the room ({gap_s:g}s)")
+    ]
+    agents: list[AgentSpec] = [hero]
+
+    if intruder:
+        # Present only inside the gap: hidden from every camera before and after.
+        agents.append(
+            AgentSpec(
+                agent_id=2,
+                waypoints_m=((1.5, depth - 1.5), (width - 1.5, 1.5)),
+                speed_mps=1.0,
+                height_m=1.58,
+                start_offset_m=0.4,
+            )
+        )
+        events.append(
+            OcclusionEvent(2, 0, gap_start + 1, None, label="intruder not yet present")
+        )
+        events.append(
+            OcclusionEvent(2, gap_end - 1, n_frames, None, label="intruder has left")
+        )
+
+    return ToySceneConfig(
+        cameras=cams,
+        agents=tuple(agents),
+        occlusions=tuple(events),
+        n_frames=n_frames,
+        fps=fps,
+        seed=seed,
+        floor_extent_m=(0.0, 0.0, width, depth),
+    )
+
+
 def crossing_scene(
     n_frames: int = 300,
     fps: float = 30.0,

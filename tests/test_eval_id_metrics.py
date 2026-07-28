@@ -19,16 +19,26 @@ FloatArray = npt.NDArray[np.float64]
 N_FRAMES = 10
 
 
-def _snapshot(global_id: int, xy: tuple[float, float], frame: int) -> GlobalTrackSnapshot:
+def _snapshot(
+    global_id: int, xy: tuple[float, float], frame: int, coasting: bool = False
+) -> GlobalTrackSnapshot:
+    """One track snapshot.
+
+    ``coasting`` must be set on frames where no camera can see the target: a
+    track reporting live camera support during a total blackout is physically
+    impossible, and the evaluator refuses to attribute a hidden agent to one
+    (otherwise a hidden person walking past a stranger's track gets credited to
+    it, which reads as an ID switch no tracker caused).
+    """
     return GlobalTrackSnapshot(
         global_id=global_id,
         frame=frame,
         world_xy=np.array(xy, dtype=np.float64),
         velocity_mps=np.zeros(2),
         covariance=np.eye(2) * 0.01,
-        state=TrackState.CONFIRMED,
-        supporting_cameras=("cam0",),
-        frames_since_measurement=0,
+        state=TrackState.COASTING if coasting else TrackState.CONFIRMED,
+        supporting_cameras=() if coasting else ("cam0",),
+        frames_since_measurement=4 if coasting else 0,
         hits=5,
     )
 
@@ -121,8 +131,10 @@ def test_unmatched_gap_then_different_id_resumes_counts_exactly_one_switch() -> 
 def test_coverage_math_all_frames_vs_visible_only() -> None:
     gt_world = _gt_always_present()
     gt_visible = _gt_visible_with_blackout((3, 6))
-    # Matched on every frame including the blackout (a coasted match).
-    results = [[_snapshot(1, (0.0, 0.0), f)] for f in range(N_FRAMES)]
+    # Matched on every frame; the blackout frames are genuinely coasted.
+    results = [
+        [_snapshot(1, (0.0, 0.0), f, coasting=3 <= f < 6)] for f in range(N_FRAMES)
+    ]
 
     report = evaluate_id_consistency(gt_world, gt_visible, results, n_ids_issued=1)
     assert report.coverage[1] == pytest.approx(1.0), "coasted matches during blackout count"
@@ -146,7 +158,9 @@ def test_survived_blackout_credited_when_track_stayed_alive() -> None:
     gt_world = _gt_always_present()
     gt_visible = _gt_visible_with_blackout((3, 6))  # 3-frame blackout
     # Coasting keeps reporting the SAME id all the way through the blackout.
-    results = [[_snapshot(1, (0.0, 0.0), f)] for f in range(N_FRAMES)]
+    results = [
+        [_snapshot(1, (0.0, 0.0), f, coasting=3 <= f < 6)] for f in range(N_FRAMES)
+    ]
 
     report = evaluate_id_consistency(gt_world, gt_visible, results, n_ids_issued=1)
     assert report.longest_blackout_id_held[1] == 3
