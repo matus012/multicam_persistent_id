@@ -1,0 +1,172 @@
+# mcreid — multi-camera persistent-ID tracking with a live BEV map
+
+Four indoor cameras, one global ID per person. A person entering any view gets an
+identity and keeps it across camera handoffs and through occlusions — including
+being hidden from **every** camera at once.
+
+Zero training. Pretrained detector, pretrained ReID, geometric late fusion.
+
+![4-view + BEV demo](docs/assets/cardboard_demo.gif)
+
+*Four camera views and the bird's-eye-view map. The person is progressively
+occluded — one camera, then two, then three, then all four. The BEV dot switches
+to a hollow coasting ring and holds `ID 1` through the 2.5 s total blackout, then
+re-locks on the same ID when the person reappears.*
+
+> **Status: G-M1-1 complete.** The numbers below are from the scripted synthetic
+> scene, which reproduces the real capture protocol exactly. The recorded-footage
+> demo (G-M1-2) is blocked on the capture session — see
+> [capture_guide.md](capture_guide.md). Repo is private.
+
+## Results
+
+### Occlusion survival — synthetic cardboard scene, 5 seeds
+
+420 frames, 4 cameras, 1 person, scripted occlusions escalating from one blocked
+view to all four.
+
+| metric | result | target |
+|---|---|---|
+| ID switches | **0** (all 5 seeds) | 0 |
+| longest total occlusion survived | **75 frames = 2.50 s** | 2-3 s |
+| coverage while visible | 98.8 % | — |
+| ground-plane position RMSE | 0.28 m | — |
+| false-positive tracks | 0 | 0 |
+
+The tracker is scored against a ReID model deliberately calibrated to published
+person-ReID difficulty — same-identity cross-camera cosine similarity ~0.73,
+different-identity ~0.45. Orthogonal random embeddings would make this gate
+meaningless.
+
+### Known limitation — two people crossing
+
+The secondary scenario (two people whose paths intersect, passing within ~0.5 m)
+gives **0-4 ID switches depending on seed**, not zero. This is a real limit of a
+zero-training geometric baseline: when two targets occupy nearly the same floor
+position, geometry is uninformative and a pretrained ReID embedding is the only
+discriminator. It is explicitly **not** a v1 gate. See
+[`scripts/README_v2_synthetic_engine.md`](scripts/README_v2_synthetic_engine.md)
+for what fixing it would take.
+
+### WILDTRACK
+
+Public-benchmark evaluation is G-M1-3, in progress. It will report MODA/MODP
+under the standard multi-view protocol as a single honest row labelled
+*"geometric baseline, no multi-view training"* alongside published MVDet numbers.
+No parity is claimed — MVDet is trained on multi-view data and this is not.
+
+## Quickstart
+
+```bash
+uv venv --python 3.11 && uv pip install -e ".[dev]"
+```
+
+Run the full pipeline and export the demo — no footage, no GPU, no dataset:
+
+```bash
+uv run mcreid-demo synthetic --scenario cardboard
+```
+
+That command runs per-view tracking, ground projection, cross-view association
+and the global ID manager, scores identity consistency, writes
+`outputs/demo/cardboard.mp4` + `.gif`, and exits non-zero if the cardboard
+criterion fails. It is the same code path the recorded demo uses; only the
+detector front-end differs.
+
+Other entry points:
+
+```bash
+uv run mcreid-demo synthetic --scenario crossing
+```
+
+```bash
+uv run pytest
+```
+
+## How it works
+
+Late fusion, locked architecture:
+
+```
+per camera:  detection -> tracking -> ReID embedding
+                          |
+                          v  ViewObservation
+             foot point -> ground-plane homography
+                          |
+                          v  GroundObservation (+ covariance)
+             per-camera Hungarian vs the global track set
+                          |
+                          v
+             global ID manager:  birth / coast / lost / ReID revive / merge
+                          |
+                          v
+             BEV canvas + 4-view mosaic
+```
+
+Association blends a Mahalanobis ground-plane distance with ReID cosine distance.
+Because the positional covariance grows while a track coasts unobserved, geometry
+gracefully stops discriminating exactly when it should, and appearance takes over
+— which is what makes the post-blackout re-lock work.
+
+Three details that turned out to matter more than the architecture:
+
+- **The ground covariance needs a world-space error floor.** Propagating pixel
+  noise through the homography Jacobian alone underestimates true projection
+  error by ~5x, because a detection box's bottom edge is not the ground-contact
+  point. Without the floor, the Mahalanobis gate collapses and one person
+  shatters into an ID per frame.
+- **Duplicate tracks must be merged.** Assignment is one-to-one *per camera*, so
+  leftover observations legitimately birth a second track on top of an existing
+  one. Both then survive and the reported identity flips between them every frame.
+- **Coasting velocity must be damped, and revival must see coasting tracks.**
+  Undamped constant velocity slides ~2.7 m away over a 2.5 s blackout; and if
+  ReID revival only considers fully-lost tracks, a still-coasting track gets a
+  fresh ID minted for a target the system is actively tracking.
+
+Each was found by measuring, not by inspection. See `context.md` §4.
+
+## Repo layout
+
+```
+src/mcreid/
+  calib/    calib.json schema, checkerboard intrinsics, AprilTag ground homography
+  sim/      virtual cameras, scripted toy scenes, synthetic frame rendering
+  track/    per-view tracking (torch-free CI path; GPU path lands with G-M1-2)
+  fusion/   ground Kalman, appearance gallery, association, global ID manager
+  eval/     identity-consistency metrics, WILDTRACK protocol
+  viz/      BEV canvas, per-view overlays, demo mosaic
+  cli/      mcreid-calibrate, mcreid-demo, mcreid-sync, mcreid-eval
+```
+
+- `context.md` — scope, architecture, locked conventions, design rationale
+- `status.txt` — current phase, blockers, next steps
+- `capture_guide.md` — the recording protocol for the real 4-camera session
+
+## Calibration
+
+```bash
+uv run mcreid-calibrate rig --capture-dir footage/calib --square-size-m 0.025
+```
+
+Per-camera intrinsics from a checkerboard, ground-plane homography from AprilTag
+36h11 markers laid flat on the floor (or four measured floor points). Writes one
+`calib.json` for the whole rig. `mcreid-calibrate check` re-verifies round-trip
+accuracy.
+
+Clip alignment for independently-started phones:
+
+```bash
+uv run mcreid-sync claps --footage footage/take3
+```
+
+## Constraints and honesty notes
+
+- Runtime target is >= 15 FPS aggregate on 4x 720p, RTX 4060 8 GB. **Not yet
+  measured** — the GPU front-end lands with G-M1-2.
+- All reported numbers come from the synthetic scene. No real-footage or
+  benchmark numbers are claimed yet.
+- Datasets, weights, footage and room calibration are never committed.
+
+## Licence
+
+AGPL-3.0-only.

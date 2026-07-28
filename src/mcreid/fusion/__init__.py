@@ -28,4 +28,6 @@ __all__ = [
     "GroundObservation",
     "TrackState",
     "ViewObservation",
+    "build_cost_matrix",
+    "linear_assignment",
 ]

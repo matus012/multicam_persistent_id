@@ -17,7 +17,10 @@ dependencies = [
     "opencv-contrib-python==4.10.0.84",
     "pydantic==2.9.2",
     "pyyaml==6.0.2",
-    "typer==0.12.5",
+    # typer < 0.13 breaks against click >= 8.2 ("Secondary flag is not valid for
+    # non-boolean flag") — keep these two moving together.
+    "typer==0.27.0",
+    "click==8.4.2",
     "rich==13.9.4",
     "tqdm==4.67.1",
 ]
@@ -60,6 +63,8 @@ ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN201", "ANN001"]
+# typer's entire API is `def cmd(x: T = typer.Option(...))`; B008 is unavoidable here.
+"src/mcreid/cli/*" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

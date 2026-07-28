@@ -205,9 +205,11 @@ class GlobalTrack:
         self.last_measured_xy = self.mean[:2].copy()
         self.supporting_cameras = tuple(sorted({o.camera_id for o in observations}))
 
-        if self.state in (TrackState.COASTING, TrackState.LOST):
-            self.state = TrackState.CONFIRMED
-        elif self.state is TrackState.TENTATIVE and self.hits >= self._config.n_init:
+        # A track that was occluded is confirmed again the moment it is measured;
+        # a tentative one only after it has survived n_init frames.
+        recovered = self.state in (TrackState.COASTING, TrackState.LOST)
+        promoted = self.state is TrackState.TENTATIVE and self.hits >= self._config.n_init
+        if recovered or promoted:
             self.state = TrackState.CONFIRMED
 
     def mark_missed(self) -> None:
@@ -310,6 +312,10 @@ class GlobalIDManager:
         self._ids_issued = 0
         self._frame = -1
         self._last_dt = 1.0 / 30.0
+        self.last_assignment: dict[tuple[str, int], int] = {}
+        """(camera_id, local_track_id) -> global_id for the most recent frame.
+        The overlay needs this to label each per-view box with the *global* ID,
+        which is the whole claim the demo makes."""
 
     # --- public API -------------------------------------------------------
 
@@ -392,13 +398,17 @@ class GlobalIDManager:
         ground = self.project_observations(views, frame)
         matched: dict[int, list[GroundObservation]] = {}
         leftovers: list[GroundObservation] = []
+        self.last_assignment = {}
 
         active = [t for t in self.tracks if t.is_active]
         for camera_id in sorted({o.camera_id for o in ground}):
             observations = [o for o in ground if o.camera_id == camera_id]
             pairs, unmatched_obs, _ = self._match_camera(observations, active)
             for obs_idx, track_idx in pairs:
-                matched.setdefault(active[track_idx].global_id, []).append(observations[obs_idx])
+                obs = observations[obs_idx]
+                global_id = active[track_idx].global_id
+                matched.setdefault(global_id, []).append(obs)
+                self.last_assignment[(camera_id, obs.local_track_id)] = global_id
             leftovers.extend(observations[i] for i in unmatched_obs)
 
         # Every live track advances exactly once per frame: measured tracks are
@@ -408,9 +418,9 @@ class GlobalIDManager:
         for track in self.tracks:
             if track.state is TrackState.DEAD:
                 continue
-            observations = matched.get(track.global_id)
-            if observations:
-                track.update(self.kf, observations, frame)
+            measurements = matched.get(track.global_id)
+            if measurements:
+                track.update(self.kf, measurements, frame)
             else:
                 track.mark_missed()
 
@@ -536,6 +546,7 @@ class GlobalIDManager:
             gap = track.frames_since_measurement
             was_lost = track.state is TrackState.LOST
             track.update(self.kf, cluster.observations, frame)
+            self._record_assignment(cluster, track.global_id)
             if gap >= self.config.n_init or was_lost:
                 logger.info(
                     "frame %d: re-associated global id %d after %d frames occluded "
@@ -591,10 +602,20 @@ class GlobalIDManager:
                     float(np.linalg.norm(keep.world_xy - other.world_xy)),
                 )
                 keep.absorb(other)
+                self._remap_assignment(other.global_id, keep.global_id)
                 absorbed.add(other.global_id)
 
         if absorbed:
             self.tracks = [t for t in self.tracks if t.global_id not in absorbed]
+
+    def _record_assignment(self, cluster: _Cluster, global_id: int) -> None:
+        for obs in cluster.observations:
+            self.last_assignment[(obs.camera_id, obs.local_track_id)] = global_id
+
+    def _remap_assignment(self, old_id: int, new_id: int) -> None:
+        for key, value in self.last_assignment.items():
+            if value == old_id:
+                self.last_assignment[key] = new_id
 
     def _birth(self, cluster: _Cluster, frame: int) -> None:
         first = cluster.observations[0]
@@ -604,6 +625,7 @@ class GlobalIDManager:
             global_id=self._ids_issued, frame=frame, mean=mean, cov=cov, config=self.config
         )
         track.update(self.kf, cluster.observations, frame)
+        self._record_assignment(cluster, track.global_id)
         self.tracks.append(track)
         logger.debug(
             "frame %d: born global id %d at (%.2f, %.2f) from %d camera(s)",
