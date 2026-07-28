@@ -64,10 +64,20 @@ for what fixing it would take.
 
 ### WILDTRACK
 
-Public-benchmark evaluation is G-M1-3, in progress. It will report MODA/MODP
-under the standard multi-view protocol as a single honest row labelled
-*"geometric baseline, no multi-view training"* alongside published MVDet numbers.
-No parity is claimed — MVDet is trained on multi-view data and this is not.
+Public-benchmark evaluation is G-M1-3. The loaders, grid conversions and
+MODA/MODP scoring are implemented and unit-tested; **no numbers are reported
+yet** because the dataset has not been run. When it is, it will be a single row
+labelled *"geometric baseline, no multi-view training"* alongside published
+MVDet figures. No parity is claimed — MVDet is trained on multi-view data and
+this is not.
+
+```bash
+python scripts/download_wildtrack.py info
+```
+
+WILDTRACK sits behind an EPFL consent gate, so the helper prints the request
+instructions and verifies an archive you download yourself. It does not scrape
+or bypass anything.
 
 ## Quickstart
 
@@ -175,8 +185,11 @@ uv run mcreid-sync --footage footage/take3
 
 ## Constraints and honesty notes
 
-- Runtime target is >= 15 FPS aggregate on 4x 720p, RTX 4060 8 GB. **Not yet
-  measured** — the GPU front-end lands with G-M1-2.
+- Runtime target is >= 15 FPS aggregate on 4x 720p, RTX 4060 8 GB. The
+  **end-to-end** figure is not measured yet — the GPU front-end lands with
+  G-M1-2. What *is* measured: per-view tracking plus fusion costs 1.0 ms/frame
+  for one person and 2.1 ms/frame for two across 4 cameras, i.e. 1.5–3 % of the
+  66.7 ms budget. Effectively the whole budget is available to the detector.
 - All reported numbers come from the synthetic scene. No real-footage or
   benchmark numbers are claimed yet.
 - Datasets, weights, footage and room calibration are never committed.
