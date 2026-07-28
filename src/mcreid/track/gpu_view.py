@@ -26,7 +26,8 @@ import numpy as np
 import numpy.typing as npt
 
 from mcreid.track.per_view import Detection, PerViewConfig, PerViewTracker
-from mcreid.utils.device import DeviceSpec, resolve_device
+from mcreid.track.reid_models import DEFAULT_EMBEDDER, Embedder, build_embedder
+from mcreid.utils.device import resolve_device
 from mcreid.utils.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only for type checkers
@@ -38,7 +39,6 @@ FloatArray = npt.NDArray[np.float64]
 Image = npt.NDArray[np.uint8]
 
 PERSON_CLASS = 0
-REID_INPUT_HW = (128, 64)  # (height, width), the standard person-ReID crop
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,11 @@ class GpuViewConfig:
     max_detections: int = 60
     embed_batch: int = 32
     device: str = "auto"
+    embedder: str = DEFAULT_EMBEDDER
+    """Appearance model, by name from `mcreid.track.reid_models.REGISTRY`.
+    Defaults to the ReID-trained OSNet; `imagenet_resnet18` reproduces the v1
+    baseline for ablation."""
+    weights_dir: Path = Path("weights")
 
     def __post_init__(self) -> None:
         if not 0.0 < self.conf_threshold < 1.0:
@@ -64,74 +69,6 @@ class GpuViewConfig:
             raise ValueError(f"imgsz must be a multiple of 32, got {self.imgsz}")
         if self.max_detections < 1 or self.embed_batch < 1:
             raise ValueError("max_detections and embed_batch must be >= 1")
-
-
-class ReidEmbedder:
-    """L2-normalised appearance vectors from person crops."""
-
-    def __init__(self, device: DeviceSpec, batch_size: int = 32) -> None:
-        import torch
-        from torchvision.models import ResNet18_Weights, resnet18
-
-        self.device = device
-        self.batch_size = batch_size
-        self._torch = torch
-
-        model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        model.fc = torch.nn.Identity()
-        self.model = model.eval().to(device.torch_device)
-        if device.kind == "cuda" and device.use_half:
-            self.model = self.model.half()
-
-        self._mean = torch.tensor([0.485, 0.456, 0.406], device=device.torch_device).view(
-            1, 3, 1, 1
-        )
-        self._std = torch.tensor([0.229, 0.224, 0.225], device=device.torch_device).view(
-            1, 3, 1, 1
-        )
-        self.dim = 512
-        logger.info("ReID embedder: ImageNet ResNet-18, %d-d, on %s", self.dim, device)
-
-    def __call__(self, image: Image, boxes: FloatArray) -> FloatArray:
-        """(N, 4) xyxy boxes -> (N, 512) unit vectors."""
-        torch = self._torch
-        if boxes.shape[0] == 0:
-            return np.zeros((0, self.dim), dtype=np.float64)
-
-        import cv2
-
-        height, width = image.shape[:2]
-        crops = []
-        for box in boxes:
-            x1 = int(np.clip(box[0], 0, width - 1))
-            y1 = int(np.clip(box[1], 0, height - 1))
-            x2 = int(np.clip(box[2], x1 + 1, width))
-            y2 = int(np.clip(box[3], y1 + 1, height))
-            patch = image[y1:y2, x1:x2]
-            if patch.size == 0:
-                patch = np.zeros((*REID_INPUT_HW, 3), dtype=np.uint8)
-            crops.append(
-                cv2.resize(
-                    patch,
-                    (REID_INPUT_HW[1], REID_INPUT_HW[0]),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-            )
-
-        stacked = np.stack(crops)[:, :, :, ::-1]  # BGR -> RGB
-        tensor = torch.from_numpy(np.ascontiguousarray(stacked)).permute(0, 3, 1, 2)
-        tensor = tensor.to(self.device.torch_device).float().div_(255.0)
-        tensor = (tensor - self._mean) / self._std
-        if self.device.kind == "cuda" and self.device.use_half:
-            tensor = tensor.half()
-
-        outputs = []
-        with torch.inference_mode():
-            for start in range(0, tensor.shape[0], self.batch_size):
-                outputs.append(self.model(tensor[start : start + self.batch_size]).float())
-        features = torch.cat(outputs, dim=0)
-        features = torch.nn.functional.normalize(features, dim=1)
-        return features.cpu().numpy().astype(np.float64)
 
 
 class GpuPerViewBackend:
@@ -143,7 +80,7 @@ class GpuPerViewBackend:
         config: GpuViewConfig | None = None,
         per_view_config: PerViewConfig | None = None,
         detector: Any | None = None,
-        embedder: ReidEmbedder | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self.camera_id = camera_id
         self.config = config or GpuViewConfig()
@@ -161,7 +98,12 @@ class GpuPerViewBackend:
                 )
             detector = YOLO(str(weights))
         self.detector = detector
-        self.embedder = embedder or ReidEmbedder(self.device, self.config.embed_batch)
+        self.embedder = embedder or build_embedder(
+            self.config.embedder,
+            device=self.device,
+            batch_size=self.config.embed_batch,
+            weights_dir=self.config.weights_dir,
+        )
         self._predict_kwargs = self._precision_kwargs()
 
     def _precision_kwargs(self) -> dict[str, Any]:

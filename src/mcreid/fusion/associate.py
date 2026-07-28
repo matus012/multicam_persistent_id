@@ -156,10 +156,18 @@ class AssociationConfig:
     # a detection on the far side of the room.
     max_distance_m: float = 2.5
     # Appearance: reject matches whose cosine distance exceeds this.
-    # Sits between the measured same-identity cross-camera p95 (~0.32) and the
-    # hardest different-identity confuser (~0.45) on the toy generator, which is
-    # calibrated to published person-ReID operating points.
-    max_appearance_distance: float = 0.40
+    #
+    # Set from a measured ROC on real WILDTRACK crops with the shipped OSNet
+    # embedder, not from the synthetic generator: 0.56 is the Youden-optimal
+    # operating point (56% of true cross-camera pairs accepted, 20% of false
+    # ones). Geometry co-gates every association, so recall is worth more than
+    # precision here — the irreversible decisions (merge, revive, dormant) use
+    # their own, tighter thresholds.
+    #
+    # An earlier value of 0.40 was inherited from a synthetic generator modelled
+    # on a *trained* ReID operating point. Against the real zero-shot embedder
+    # that gate rejects ~83% of genuine cross-camera matches.
+    max_appearance_distance: float = 0.56
     # Blend. Emphasis on appearance — single-target occlusion survival is the
     # ship criterion, and geometry goes uninformative exactly when it matters.
     weight_geometry: float = 0.4

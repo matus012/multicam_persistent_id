@@ -71,8 +71,26 @@ class FusionConfig:
 
     # --- birth clustering ---
     birth_cluster_radius_m: float = 1.0
-    """Leftover observations within this ground distance (and matching on
-    appearance) are treated as the same new person."""
+    """Leftover observations within this ground distance (and not clearly
+    different on appearance) are treated as the same new person."""
+    cluster_appearance_distance: float = 0.62
+    """Appearance **veto** for grouping observations across cameras, and for
+    attaching a leftover cluster to a co-located track.
+
+    Deliberately looser than every other appearance gate, and set near the
+    *different*-identity mean (0.623 measured) rather than the same-identity one.
+    The reasoning: two detections that land within a metre of each other on the
+    floor, from different cameras, are already strongly evidenced to be one
+    person — the measured cross-camera disagreement for a real person on
+    WILDTRACK is 0.12 m. Demanding that a zero-shot embedder also *confirm* the
+    match throws that evidence away: with same-identity cross-camera distance
+    averaging 0.525, a 0.56 gate rejects nearly half of genuine pairs, and the
+    first frame of a 3-person scene mints 7 global IDs instead of 3.
+
+    So appearance here only rejects pairs that are *clearly* different people.
+    The irreversible operations — merge, revive, dormant resurrection — keep
+    their strict thresholds, because there geometry is weak or absent and a
+    wrong answer destroys an identity."""
     merge_radius_m: float = 0.75
     """Two live tracks closer than this *and* appearance-compatible are the same
     person seen twice — merge them, keeping the senior ID.
@@ -81,16 +99,21 @@ class FusionConfig:
     one-to-one, so when two cameras match an existing track and two do not, the
     leftovers legitimately birth a second track on top of the first. Both then
     survive, and every frame the reported identity flips between them."""
-    merge_appearance_distance: float = 0.34
+    merge_appearance_distance: float = 0.48
     """EMA-to-EMA cosine distance ceiling for a merge. Two co-located tracks of
     one person must clear this; two different people walking past each other
-    must not. Measured separation on the toy generator: same identity across
-    cameras ~0.27, different identities ~0.53."""
+    must not.
+
+    Tighter than the association gate because a merge is irreversible. On the
+    measured OSNet ROC this accepts ~30% of true cross-camera pairs at ~3% false
+    accepts — deliberately recall-poor, since a missed merge costs one duplicate
+    track while a wrong merge destroys an identity."""
 
     # --- revival ---
-    revive_appearance_distance: float = 0.34
+    revive_appearance_distance: float = 0.48
     """Tighter than the frame-to-frame gate: reviving the wrong ID is the one
-    failure the cardboard test cannot survive, so demand stronger evidence."""
+    failure the cardboard test cannot survive, so demand stronger evidence.
+    Same measured operating point as the merge gate."""
     revive_speed_margin_m: float = 1.5
     """Slack added to ``max_speed_mps * elapsed`` when bounding how far a lost
     target could have walked while unobserved."""
@@ -580,7 +603,7 @@ class GlobalIDManager:
         """
         clusters: list[_Cluster] = []
         radius = self.config.birth_cluster_radius_m
-        max_app = self.config.association.max_appearance_distance
+        max_app = self.config.cluster_appearance_distance
 
         for obs in sorted(observations, key=lambda o: o.score, reverse=True):
             placed = False
@@ -856,7 +879,7 @@ class GlobalIDManager:
                         cluster.embedding[None, :], top_k=self.config.revive_gallery_top_k
                     )[0]
                 )
-                if appearance > self.config.association.max_appearance_distance:
+                if appearance > self.config.cluster_appearance_distance:
                     continue
                 best, best_distance = track, gap
             if best is None:

@@ -111,9 +111,14 @@ class DormantConfig:
     """Bound on gallery size. When full, the oldest identity is evicted."""
     embeddings_per_id: int = 8
     """Representative vectors kept per identity."""
-    appearance_distance: float = 0.26
+    appearance_distance: float = 0.42
     """Strict cosine gate. Tighter than live re-association, because no motion
-    gate constrains this decision."""
+    gate constrains this decision.
+
+    Measured on real WILDTRACK crops with the shipped OSNet embedder, this
+    accepts ~20% of true cross-camera pairs at ~0.9% false accepts. Recall is
+    deliberately sacrificed: failing to resurrect costs a new ID, whereas a
+    wrong resurrection hands one person another person's identity."""
     top_k: int = 3
     """Top-k mean used for the query-to-identity distance."""
     ratio_test: float = 0.85

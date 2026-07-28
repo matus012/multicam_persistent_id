@@ -100,18 +100,27 @@ class NoiseSpec:
     identity prototype* (the raw gaussians are scaled by 1/sqrt(embed_dim)), so
     they mean the same thing at any ``embed_dim``.
 
-    Defaults are tuned to reproduce published person-ReID operating points
-    rather than a flattering toy: cross-camera same-identity cosine similarity
-    lands around 0.7 and different-identity around 0.45. Orthogonal random
-    prototypes would give ~0.0 for different identities and make the
-    ID-consistency gate meaningless, so identities deliberately share a
-    ``identity_similarity``-weighted "person-ness" component.
+    Defaults are fitted to the operating point **measured on real WILDTRACK
+    crops** with the shipped OSNet embedder (`docs/wildtrack_results.md`):
+
+        same identity,      different camera : 0.525 cosine distance
+        different identity, different camera : 0.623
+
+    An earlier version of this class was calibrated to *published* person-ReID
+    numbers (0.27 / 0.53). Those describe a model trained on the target domain;
+    the shipped stack is zero-shot, and its real separation is ~0.10 rather than
+    ~0.26. Every fusion threshold was tuned against that easier distribution, and
+    no synthetic test could have caught it, because the generator and the gate
+    shared the assumption. The parameters below are derived analytically from the
+    measured targets: with |p|=|B|=1 and unit-scaled noise,
+        S = 1 + camera_bias^2 + embed_noise^2 = 1 / (1 - d_same)
+        rho = S * (1 - d_diff),  identity_similarity = sqrt(rho / (1 - rho))
     """
 
     bbox_jitter_px: float = 3.0
-    embed_noise: float = 0.45
-    camera_bias: float = 0.40
-    identity_similarity: float = 0.85
+    embed_noise: float = 0.74
+    camera_bias: float = 0.74
+    identity_similarity: float = 1.96
     dropout_prob: float = 0.02
     false_positive_rate: float = 0.05
     score_mean: float = 0.88
