@@ -220,6 +220,15 @@ class GlobalTrack:
         self.last_measured_xy = mean[:2].copy()
         self.supporting_cameras: tuple[str, ...] = ()
         self.ever_confirmed = False
+        self.inherited_hits = 0
+        """Evidence carried over from a previous life via the dormant gallery.
+
+        Kept separate from ``hits`` on purpose. ``hits`` drives the lifecycle and
+        must restart at zero on resurrection so the returning track still has to
+        earn confirmation; ``inherited_hits`` only decides whether the identity
+        is worth re-storing later. Folding them together makes a brief second
+        visit — a few frames — fail the gallery's min_hits and delete the
+        identity permanently."""
         self._config = config
 
     # --- properties -------------------------------------------------------
@@ -282,7 +291,14 @@ class GlobalTrack:
         self.supporting_cameras = ()
 
         if self.state is TrackState.TENTATIVE:
-            # An unconfirmed track that immediately vanishes was a false positive.
+            # An unconfirmed track that immediately vanishes was a false positive
+            # — unless it carries a resurrected identity, which is backed by real
+            # prior evidence and only has to prove it is present again. Killing
+            # those on the first miss makes them die and re-resurrect every other
+            # frame, which is far worse than the one-frame award it replaced.
+            grace = self._config.n_init * 2 if self.inherited_hits > 0 else 0
+            if self.frames_since_measurement <= grace:
+                return
             self.state = TrackState.DEAD
             return
         if self.state in (TrackState.CONFIRMED, TrackState.COASTING):
@@ -664,10 +680,15 @@ class GlobalIDManager:
         # absorb — and rename — a 500-hit identity that happens to be behind the
         # cardboard right now, which is precisely the failure this project exists
         # to prevent.
+        # Seniority counts inherited history. A just-resurrected identity is
+        # deliberately TENTATIVE (it must re-earn confirmation), but it is not a
+        # candidate — it carries a real person's ID. Ranking it below a freshly
+        # confirmed duplicate of the same person lets the duplicate absorb it,
+        # and the identity recovered from the gallery is lost on the next frame.
         live.sort(
             key=lambda t: (
-                t.state is TrackState.TENTATIVE,
-                -t.hits,
+                t.state is TrackState.TENTATIVE and t.inherited_hits == 0,
+                -max(t.hits, t.inherited_hits),
                 t.birth_frame,
                 t.global_id,
             )
@@ -775,7 +796,14 @@ class GlobalIDManager:
             # than `add`: the stored vectors must not drag the EMA away from what
             # the person looks like right now.
             track.gallery.seed("_dormant", entry.embeddings)
-            track.hits = self.config.n_init  # it is a known identity, not a candidate
+            # Resurrect the ID, do NOT award it. n_init exists to kill one-frame
+            # false positives, and the dormant path is the last place to exempt
+            # them: a single-camera, single-frame sighting would otherwise be
+            # labelled with a real person's identity and drawn on the BEV. The
+            # track carries the old ID but must still earn confirmation.
+            track.hits = 0
+            track.inherited_hits = entry.hits
+            track.state = TrackState.TENTATIVE
             track.update(self.kf, cluster.observations, frame)
             self._record_assignment(cluster, global_id)
             self.tracks.append(track)
@@ -902,9 +930,9 @@ class GlobalIDManager:
             old_id = track.global_id
             track.global_id = global_id
             track.gallery.seed("_dormant", entry.embeddings)
-            track.hits = max(track.hits, self.config.n_init)
-            track.state = TrackState.CONFIRMED
-            track.ever_confirmed = True
+            # Adopt the identity, not the confirmation: the candidate still has
+            # to accumulate n_init measured frames like any other track.
+            track.inherited_hits = entry.hits
             self._remap_assignment(old_id, global_id)
             logger.info(
                 "frame %d: candidate track (was id %d) ADOPTED dormant global id %d "
@@ -924,13 +952,23 @@ class GlobalIDManager:
                 survivors.append(track)
                 continue
             # A track that never confirmed was a false positive; storing it would
-            # let a hallucination reclaim an identity later.
-            if track.ever_confirmed:
+            # let a hallucination reclaim an identity later. A resurrected track
+            # that failed to re-confirm is the exception: its identity was real,
+            # so the entry goes back to the gallery rather than being consumed by
+            # a return that did not stick.
+            if track.ever_confirmed or track.inherited_hits > 0:
                 self.dormant.admit(
                     global_id=track.global_id,
-                    vectors=[vector for _cam, vector in track.gallery.items()],
+                    # Exclude inherited `_dormant` seeds: re-admitting them makes
+                    # each visit store representatives-of-representatives, and the
+                    # identity slowly ossifies around its first sighting.
+                    vectors=[
+                        vector
+                        for cam, vector in track.gallery.items()
+                        if cam != "_dormant"
+                    ],
                     frame=frame,
-                    hits=track.hits,
+                    hits=max(track.hits, track.inherited_hits),
                     cameras_seen=track.gallery.cameras,
                     last_world_xy=track.last_measured_xy,
                 )

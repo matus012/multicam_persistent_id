@@ -262,30 +262,53 @@ class DormantGallery:
             [self._entries[gid].distance(query, self.config.top_k) for gid in ids], axis=1
         )  # (n_queries, n_dormant)
 
-        gated = cost > self.config.appearance_distance
-        # Ratio test per query: if the best two candidates are comparably good,
-        # the appearance evidence does not identify anyone. Reject the whole row
-        # rather than guessing — a wrong resurrection hands one person another
-        # person's identity, which is worse than minting a new ID.
+        # Ratio test, computed on the UNGATED row and applied before gating.
+        # Ranking post-gate candidates is worse than useless: the true owner
+        # sitting marginally outside the threshold becomes +inf and can never be
+        # the runner-up, so a stranger who happens to fall inside is handed the
+        # identity unopposed — exactly the confusable case the test exists for.
         if cost.shape[1] >= 2:
-            order = np.sort(np.where(gated, np.inf, cost), axis=1)
+            order = np.sort(cost, axis=1)
             best, second = order[:, 0], order[:, 1]
             ambiguous = np.isfinite(second) & (best > self.config.ratio_test * second)
-            if ambiguous.any():
-                self.n_rejected_ambiguous += int(ambiguous.sum())
-                logger.info(
-                    "dormant match rejected as ambiguous for %d query/queries "
-                    "(best and runner-up within the %.2f ratio)",
-                    int(ambiguous.sum()),
-                    self.config.ratio_test,
-                )
-            gated |= ambiguous[:, None]
+        else:
+            ambiguous = np.zeros(cost.shape[0], dtype=bool)
 
+        if ambiguous.any():
+            self.n_rejected_ambiguous += int(ambiguous.sum())
+            logger.info(
+                "dormant match rejected as ambiguous for %d query/queries "
+                "(best and runner-up within the %.2f ratio)",
+                int(ambiguous.sum()),
+                self.config.ratio_test,
+            )
+
+        gated = (cost > self.config.appearance_distance) | ambiguous[:, None]
         matrix = np.where(gated, INFEASIBLE, cost)
         pairs, _unmatched_rows, _unmatched_cols = linear_assignment(
             matrix, self.config.appearance_distance
         )
-        return [(row, ids[col], float(cost[row, col])) for row, col in pairs]
+
+        # A global one-to-one solve can hand a query its runner-up because its
+        # best match was cheaper for someone else. Two people returning together
+        # would swap identities. Reject any pair materially worse than that
+        # query's own best option.
+        accepted: list[tuple[int, int, float]] = []
+        for row, col in pairs:
+            row_best = float(cost[row].min())
+            if float(cost[row, col]) > row_best / max(self.config.ratio_test, 1e-9):
+                self.n_rejected_ambiguous += 1
+                logger.info(
+                    "dormant assignment rejected: query %d was given id %d at %.3f "
+                    "but its own best option was %.3f",
+                    row,
+                    ids[col],
+                    float(cost[row, col]),
+                    row_best,
+                )
+                continue
+            accepted.append((row, ids[col], float(cost[row, col])))
+        return accepted
 
     def pop(self, global_id: int) -> DormantEntry:
         """Remove and return an identity being resurrected."""

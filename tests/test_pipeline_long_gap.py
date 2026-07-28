@@ -18,11 +18,38 @@ from mcreid.sim.toy import generate_scene, long_gap_scene
 GATE_SEEDS = [1, 42, 2024]
 
 
+def test_long_gap_scene_actually_contains_distractors() -> None:
+    """Guard the guard.
+
+    An earlier version of this scene had one agent and nothing else, and a
+    stateless 25-line stub passed every assertion below — the same failure
+    already fixed once for the cardboard gate. If someone simplifies the scene
+    again, fail here loudly rather than silently disarming the gate.
+    """
+    config = long_gap_scene(gap_s=75.0, seed=42)
+    assert len(config.agents) >= 2, "the long-gap gate needs a second person in the room"
+    assert len(config.static_false_positives) >= 1, "the gate needs a persistent false positive"
+
+    scene = generate_scene(config)
+    hero_hidden = ~scene.gt_visible[1].any(axis=1)
+    others_present = [
+        a for a in scene.gt_world if a != 1 and scene.gt_visible[a][hero_hidden].any()
+    ]
+    assert others_present, "someone must remain visible while the hero is away"
+
+
 @pytest.mark.parametrize("seed", GATE_SEEDS)
 def test_hero_keeps_id_across_a_75_second_absence(seed: int) -> None:
-    """THE long-gap gate: leave for 75 s, come back, same global ID."""
-    scene = generate_scene(long_gap_scene(gap_s=75.0, seed=seed))
-    report = run_toy_scene(scene).report
+    """THE long-gap gate: leave for 75 s, come back, same global ID.
+
+    Asserted against a scene that also contains a second person and a persistent
+    false positive, so the result cannot be earned by simply never minting a
+    second confirmed identity.
+    """
+    config = long_gap_scene(gap_s=75.0, seed=seed)
+    scene = generate_scene(config)
+    result = run_toy_scene(scene)
+    report = result.report
 
     assert report.total_id_switches == 0, (
         f"seed={seed}: the hero must keep one global ID across the absence, got "
@@ -31,6 +58,20 @@ def test_hero_keeps_id_across_a_75_second_absence(seed: int) -> None:
     )
     assert report.ids_per_agent[1] == [report.ids_per_agent[1][0]], (
         f"seed={seed}: expected a single global id, got {report.ids_per_agent[1]}"
+    )
+    # The stub beat the real pipeline on both of these, so they are gated now.
+    assert report.coverage_visible[1] > 0.95, (
+        f"seed={seed}: coverage_visible {report.coverage_visible[1]:.3f} <= 0.95"
+    )
+    expected_ids = len(config.agents) + len(config.static_false_positives)
+    assert result.n_ids_issued <= expected_ids + 1, (
+        f"seed={seed}: {result.n_ids_issued} global IDs minted for "
+        f"{len(config.agents)} people plus {len(config.static_false_positives)} "
+        f"false positive(s) — the tracker is churning identities"
+    )
+    assert report.false_positive_tracks <= len(config.static_false_positives), (
+        f"seed={seed}: {report.false_positive_tracks} false-positive tracks, expected at "
+        f"most the {len(config.static_false_positives)} injected"
     )
 
 
@@ -139,12 +180,19 @@ def test_a_stateless_stub_cannot_pass_the_long_gap_gate() -> None:
             ]
         )
 
+    config = long_gap_scene(gap_s=75.0, seed=42, intruder=True)
     report = evaluate_id_consistency(
         scene.gt_world, scene.gt_visible, snapshots, n_ids_issued=1
     )
-    hero_ids = set(report.ids_per_agent.get(1, []))
-    intruder_ids = set(report.ids_per_agent.get(2, []))
-    assert hero_ids & intruder_ids, (
-        "the stub hands the same id to the hero and the intruder; if this ever stops "
-        "being true the stub has become a real tracker and this test is meaningless"
+    hero_ids = report.ids_per_agent.get(1, [])
+    passes_gate = (
+        report.total_id_switches == 0
+        and len(hero_ids) == 1
+        and report.coverage_visible.get(1, 0.0) > 0.95
+        and report.false_positive_tracks <= len(config.static_false_positives)
+    )
+    assert not passes_gate, (
+        "a stateless stub passed the long-gap gate — the scene has stopped testing "
+        f"identity. hero ids={hero_ids} switches={report.total_id_switches} "
+        f"coverage_visible={report.coverage_visible.get(1)}"
     )

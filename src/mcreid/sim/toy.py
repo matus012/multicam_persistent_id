@@ -603,7 +603,27 @@ def long_gap_scene(
     events = [
         OcclusionEvent(1, gap_start, gap_end, None, label=f"hero out of the room ({gap_s:g}s)")
     ]
-    agents: list[AgentSpec] = [hero]
+    # A resident who never leaves, exactly as cardboard_scene has. Without a
+    # second body "zero ID switches" is earned by never minting a second
+    # confirmed ID, and a stateless stub passes the whole gate — this is the
+    # G-M1-1 mistake, and it was reintroduced here once already.
+    # Paced clear of both the hero loop and the intruder's diagonal: two bodies
+    # occupying one floor point is not a scenario a real clip contains, and
+    # scoring against it measures the tie-break, not the tracker.
+    # Placement solved numerically rather than guessed: this is the point with
+    # the largest clearance from the hero loop, the intruder's diagonal, the
+    # static false positive and every camera mount, while still being visible to
+    # all four cameras. Standing a distractor under a camera produces truncated,
+    # unstable detections and fragments *every* track in the scene, which then
+    # gets misread as a fusion problem.
+    resident = AgentSpec(
+        agent_id=3,
+        waypoints_m=((1.45, 2.15), (1.65, 2.45)),
+        speed_mps=0.35,
+        height_m=1.68,
+        start_offset_m=0.2,
+    )
+    agents: list[AgentSpec] = [hero, resident]
 
     if intruder:
         # Present only inside the gap: hidden from every camera before and after.
@@ -627,6 +647,7 @@ def long_gap_scene(
         cameras=cams,
         agents=tuple(agents),
         occlusions=tuple(events),
+        static_false_positives=(StaticFalsePositive(world_xy_m=(0.6, 2.6)),),
         n_frames=n_frames,
         fps=fps,
         seed=seed,
