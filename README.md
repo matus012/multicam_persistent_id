@@ -8,10 +8,11 @@ Zero training. Pretrained detector, pretrained ReID, geometric late fusion.
 
 ![4-view + BEV demo](docs/assets/cardboard_demo.gif)
 
-*Four camera views and the bird's-eye-view map. The person is progressively
-occluded — one camera, then two, then three, then all four. The BEV dot switches
-to a hollow coasting ring and holds `ID 1` through the 2.5 s total blackout, then
-re-locks on the same ID when the person reappears.*
+*Four camera views and the bird's-eye-view map. The hero is progressively
+occluded — one camera, then two, then three, then all four — while a second
+person and a persistent false positive keep being tracked alongside. The hero's
+BEV dot switches to a hollow coasting ring, holds its ID through the 2.5 s total
+blackout, and re-locks on the same ID when they reappear.*
 
 > **Status: G-M1-1 complete.** The numbers below are from the scripted synthetic
 > scene, which reproduces the real capture protocol exactly. The recorded-footage
@@ -22,21 +23,46 @@ re-locks on the same ID when the person reappears.*
 
 ### Occlusion survival — synthetic cardboard scene, 5 seeds
 
-420 frames, 4 cameras, 1 person, scripted occlusions escalating from one blocked
-view to all four.
+420 frames, 4 cameras. Scripted occlusions escalate from one blocked view to all
+four. The scene contains the hero **plus a second person and a persistent false
+positive** — see "why the scene has distractors" below.
 
 | metric | result | target |
 |---|---|---|
 | ID switches | **0** (all 5 seeds) | 0 |
-| longest total occlusion survived | **75 frames = 2.50 s** | 2-3 s |
-| coverage while visible | 98.8 % | — |
-| ground-plane position RMSE | 0.28 m | — |
-| false-positive tracks | 0 | 0 |
+| ID held across total blackout | **75 frames = 2.50 s** | 2-3 s |
+| BEV dot alive during blackout | **75 / 75 frames** | full |
+| prediction within 1 m of truth during blackout | 38 frames = 1.27 s | reported, not gated |
+| mean coast drift during blackout | 0.88 m | reported, not gated |
+| coverage while visible | 98.8 % | > 95 % |
+| ground-plane position RMSE | 0.22 m | — |
+
+Note the honest split: the BEV dot survives the **whole** blackout and the
+identity is retained, but constant-velocity coasting only stays accurate for
+about the first half of it. The last part of the identity is recovered by the
+ReID re-lock on reappearance, not by the motion model. The demo prints both
+numbers and the gate asserts the first.
 
 The tracker is scored against a ReID model deliberately calibrated to published
 person-ReID difficulty — same-identity cross-camera cosine similarity ~0.73,
 different-identity ~0.45. Orthogonal random embeddings would make this gate
 meaningless.
+
+### Why the scene has distractors
+
+An earlier version of this gate had one person in the scene and reported the same
+"0 ID switches". That number was worthless. With a single agent, zero switches is
+achieved by any tracker that never mints a second *confirmed* ID — an adversarial
+review demonstrated that a **stateless 30-line stub** with no ReID, no Kalman
+filter, no coasting and no lifecycle passed all five seeds, and beat the real
+tracker's position error while doing it.
+
+The gate now includes a second person and a persistent false positive (the
+detector-hallucination class that actually costs identities, since it forms a
+stable tracklet instead of being filtered as per-frame noise). The same stub now
+fails every seed at 19 % coverage. `longest_blackout_id_held` was also split from
+`longest_blackout_alive` because the original metric credited a tracker that
+emitted *nothing* for the whole occlusion and re-acquired afterwards.
 
 ### Calibration accuracy
 
@@ -148,6 +174,12 @@ Three details that turned out to matter more than the architecture:
   fresh ID minted for a target the system is actively tracking.
 
 Each was found by measuring, not by inspection. See `context.md` §4.
+
+A fourth, found by adversarial review: merge seniority ranked `COASTING` below
+`CONFIRMED`, so a freshly-confirmed 3-hit track could absorb — and rename — a
+500-hit identity that happened to be behind the cardboard at that moment. That is
+exactly the failure this project exists to prevent, and it was invisible on a
+single-agent scene because nothing else ever confirmed.
 
 ## Repo layout
 

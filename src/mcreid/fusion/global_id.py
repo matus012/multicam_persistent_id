@@ -45,6 +45,9 @@ logger = get_logger(__name__)
 
 FloatArray = npt.NDArray[np.float64]
 
+# How many of a merged-away track's embeddings the survivor inherits, per camera.
+_ABSORB_PER_CAMERA = 3
+
 
 @dataclass(frozen=True)
 class FusionConfig:
@@ -86,6 +89,16 @@ class FusionConfig:
     revive_speed_margin_m: float = 1.5
     """Slack added to ``max_speed_mps * elapsed`` when bounding how far a lost
     target could have walked while unobserved."""
+    revive_max_reach_m: float | None = None
+    """Hard ceiling on that reach. ``max_speed * elapsed`` exceeds the diagonal of
+    a bedroom after about two seconds, so past that point the motion gate admits
+    the entire room and stops constraining anything. Defaults to the rig's floor
+    diagonal when the rig declares an extent."""
+    revive_gallery_top_k: int = 3
+    """Revival ranks candidates on the mean of the ``k`` best gallery matches
+    rather than the single best. Max-similarity over a large gallery is an
+    optimistic statistic whose false-accept rate climbs steeply with gallery
+    size, and revival is exactly where a wrong decision renames a person."""
 
     # --- measurement model ---
     detection_sigma_px: float = 6.0
@@ -122,6 +135,42 @@ class FusionConfig:
             raise ValueError("n_init must be >= 1")
         if self.max_coast_frames < 1:
             raise ValueError("max_coast_frames must be >= 1")
+        # Every knob below can silently produce garbage if left unchecked:
+        # damping > 1 accelerates a coasted track instead of parking it, a huge
+        # merge radius fuses the whole room, and a negative sigma drops every
+        # observation. Fail loudly at construction instead.
+        if not 0.0 < self.coast_velocity_damping <= 1.0:
+            raise ValueError(
+                f"coast_velocity_damping must be in (0, 1] — values above 1 make a "
+                f"coasting track accelerate away from its target; got "
+                f"{self.coast_velocity_damping}"
+            )
+        positive = (
+            "birth_cluster_radius_m",
+            "merge_radius_m",
+            "merge_appearance_distance",
+            "revive_appearance_distance",
+            "detection_sigma_px",
+            "max_position_sigma_m",
+            "process_noise",
+            "max_speed_mps",
+        )
+        for name in positive:
+            if getattr(self, name) <= 0.0:
+                raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
+        non_negative = ("revive_speed_margin_m", "ground_model_sigma_m", "border_tolerance_px")
+        for name in non_negative:
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+        if self.revive_max_reach_m is not None and self.revive_max_reach_m <= 0.0:
+            raise ValueError("revive_max_reach_m must be positive when set")
+        if self.revive_gallery_top_k < 1:
+            raise ValueError("revive_gallery_top_k must be >= 1")
+        if self.truncated_box_sigma_multiplier < 1.0:
+            raise ValueError(
+                "truncated_box_sigma_multiplier must be >= 1 — a clipped box is never "
+                f"more trustworthy than a whole one; got {self.truncated_box_sigma_multiplier}"
+            )
         if self.reid_window_frames < self.max_coast_frames:
             raise ValueError(
                 f"reid_window_frames ({self.reid_window_frames}) must be >= "
@@ -236,8 +285,14 @@ class GlobalTrack:
         """Fold a duplicate track into this one. ``self`` keeps its global ID."""
         if other.global_id == self.global_id:
             raise ValueError("a track cannot absorb itself")
-        for camera_id, vector in other.gallery.items():
-            self.gallery.add(camera_id, vector)
+        # Absorb only a bounded, most-recent slice of the loser's appearance
+        # evidence. `gallery.distance` is 1 - max similarity, so wholesale
+        # copying makes one bad merge permanent: the survivor gains a vector that
+        # will happily match the wrong person forever, and there is no un-merge.
+        for camera_id in other.gallery.cameras:
+            vectors = [v for cam, v in other.gallery.items() if cam == camera_id]
+            for vector in vectors[-_ABSORB_PER_CAMERA:]:
+                self.gallery.add(camera_id, vector)
         self.hits = max(self.hits, other.hits)
         self.birth_frame = min(self.birth_frame, other.birth_frame)
         self.supporting_cameras = tuple(
@@ -525,11 +580,17 @@ class GlobalIDManager:
         embeddings = np.stack([c.embedding for c in clusters])
         positions = np.stack([c.world_xy for c in clusters])
 
+        reach_cap = self.config.revive_max_reach_m or self._floor_diagonal_m()
         for j, track in enumerate(candidates):
             elapsed_s = track.frames_since_measurement * self._last_dt
-            reach = self.config.max_speed_mps * elapsed_s + self.config.revive_speed_margin_m
+            reach = min(
+                self.config.max_speed_mps * elapsed_s + self.config.revive_speed_margin_m,
+                reach_cap,
+            )
             distance = np.linalg.norm(positions - track.last_measured_xy, axis=1)
-            appearance = track.gallery.distance(embeddings)
+            appearance = track.gallery.robust_distance(
+                embeddings, top_k=self.config.revive_gallery_top_k
+            )
             feasible = (distance <= reach) & (
                 appearance <= self.config.revive_appearance_distance
             )
@@ -568,7 +629,19 @@ class GlobalIDManager:
         live = [t for t in self.tracks if t.is_active]
         if len(live) < 2:
             return
-        live.sort(key=lambda t: (t.state is not TrackState.CONFIRMED, -t.hits, t.global_id))
+        # Seniority is about track history, not this frame's measurement status.
+        # Ranking COASTING below CONFIRMED lets a 3-hit track that just confirmed
+        # absorb — and rename — a 500-hit identity that happens to be behind the
+        # cardboard right now, which is precisely the failure this project exists
+        # to prevent.
+        live.sort(
+            key=lambda t: (
+                t.state is TrackState.TENTATIVE,
+                -t.hits,
+                t.birth_frame,
+                t.global_id,
+            )
+        )
 
         absorbed: set[int] = set()
         # Merging is destructive and irreversible, so it is tested against the
@@ -607,6 +680,14 @@ class GlobalIDManager:
 
         if absorbed:
             self.tracks = [t for t in self.tracks if t.global_id not in absorbed]
+
+    def _floor_diagonal_m(self) -> float:
+        """Diagonal of the rig's declared floor, or +inf when none is declared."""
+        try:
+            x0, y0, x1, y1 = self.rig.floor_extent()
+        except ValueError:
+            return float("inf")
+        return float(np.hypot(x1 - x0, y1 - y0))
 
     def _record_assignment(self, cluster: _Cluster, global_id: int) -> None:
         for obs in cluster.observations:

@@ -185,16 +185,53 @@ def synthetic(
         typer.echo(f"wrote {gif_path}")
 
     if scenario is Scenario.CARDBOARD:
-        switches = report.total_id_switches
-        survived = report.longest_coast_survived.get(1, 0)
-        verdict = "PASS" if switches == 0 else "FAIL"
-        typer.echo(
-            f"\ncardboard criterion: {verdict} "
-            f"(ID switches={switches}, longest total occlusion survived={survived} frames "
-            f"= {survived / config.fps:.2f} s)"
+        # Every criterion the pytest gate asserts is checked here too. Gating on
+        # ID switches alone is not a gate: a tracker that emits nothing scores
+        # zero switches, and one that goes silent through the blackout still gets
+        # full credit for holding its ID across it.
+        blackout_frames = max(
+            (e.n_frames for e in config.occlusions if e.camera_ids is None), default=0
         )
-        if switches != 0:
+        checks = {
+            "zero ID switches": (report.total_id_switches == 0, report.total_id_switches),
+            "ID held across blackout": (
+                report.longest_blackout_id_held.get(1, 0) >= blackout_frames,
+                report.longest_blackout_id_held.get(1, 0),
+            ),
+            "BEV dot alive through blackout": (
+                report.longest_blackout_alive.get(1, 0) >= blackout_frames,
+                report.longest_blackout_alive.get(1, 0),
+            ),
+            "coverage while visible > 0.95": (
+                report.coverage_visible.get(1, 0.0) > 0.95,
+                round(report.coverage_visible.get(1, 0.0), 4),
+            ),
+            # The scene deliberately injects persistent false positives, which a
+            # detector-driven tracker is expected to track. Requiring zero here
+            # would only be satisfiable by removing them from the scene.
+            "no unexplained false-positive tracks": (
+                report.false_positive_tracks <= len(config.static_false_positives),
+                f"{report.false_positive_tracks} "
+                f"(injected {len(config.static_false_positives)})",
+            ),
+        }
+        typer.echo(f"\ncardboard criterion (blackout = {blackout_frames} frames):")
+        for name, (ok, value) in checks.items():
+            typer.echo(f"  [{'PASS' if ok else 'FAIL'}] {name}: {value}")
+
+        failed = [name for name, (ok, _) in checks.items() if not ok]
+        if failed:
+            typer.echo(f"\ncardboard criterion: FAIL ({len(failed)} of {len(checks)})")
             raise typer.Exit(code=1)
+        coasted = report.longest_blackout_coasted.get(1, 0)
+        typer.echo(
+            f"\ncardboard criterion: PASS "
+            f"({blackout_frames / config.fps:.2f} s total occlusion, ID intact). "
+            f"Of that, the prediction stayed within the {1.0:.1f} m match radius for "
+            f"{coasted} frames ({coasted / config.fps:.2f} s, mean drift "
+            f"{report.blackout_position_error_m:.2f} m) — the rest of the identity is "
+            f"recovered by the ReID re-lock, not by the coast."
+        )
 
 
 @app.command()

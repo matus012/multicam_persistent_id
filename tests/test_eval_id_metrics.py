@@ -89,7 +89,11 @@ def test_unmatched_gap_then_same_id_resumes_causes_no_switch() -> None:
     # 7 of 10 frames matched -> coverage; all 7 visible frames matched -> coverage_visible.
     assert report.coverage[1] == pytest.approx(0.7)
     assert report.coverage_visible[1] == pytest.approx(1.0)
-    assert report.longest_coast_survived[1] == 3
+    # The id is held across the blackout, but nothing was emitted during it, so
+    # neither the "dot stayed alive" nor the "stayed accurate" figure is earned.
+    assert report.longest_blackout_id_held[1] == 3
+    assert report.longest_blackout_alive[1] == 0
+    assert report.longest_blackout_coasted[1] == 0
 
 
 def test_unmatched_gap_then_different_id_resumes_counts_exactly_one_switch() -> None:
@@ -135,17 +139,39 @@ def test_coverage_nan_when_agent_never_present() -> None:
     assert np.isnan(report.coverage_visible[1])
 
 
-# --- longest_coast_survived: a survived blackout is credited ------------------------------
+# --- blackout accounting ------------------------------------------------------------------
 
 
-def test_survived_blackout_credited_to_longest_coast_survived() -> None:
+def test_survived_blackout_credited_when_track_stayed_alive() -> None:
     gt_world = _gt_always_present()
     gt_visible = _gt_visible_with_blackout((3, 6))  # 3-frame blackout
     # Coasting keeps reporting the SAME id all the way through the blackout.
     results = [[_snapshot(1, (0.0, 0.0), f)] for f in range(N_FRAMES)]
 
     report = evaluate_id_consistency(gt_world, gt_visible, results, n_ids_issued=1)
-    assert report.longest_coast_survived[1] == 3
+    assert report.longest_blackout_id_held[1] == 3
+    assert report.longest_blackout_alive[1] == 3
+    assert report.longest_blackout_coasted[1] == 3
+
+
+def test_two_separate_blackouts_are_not_summed() -> None:
+    """Regression: the run counter used to carry across visible-but-unmatched
+    frames, so two 3-frame blackouts were reported as one 6-frame blackout."""
+    gt_world = _gt_always_present()
+    visible = np.ones((N_FRAMES, 2), dtype=bool)
+    visible[2:5] = False  # blackout A
+    visible[6:9] = False  # blackout B
+    gt_visible = {1: visible}
+    results = []
+    for frame in range(N_FRAMES):
+        # Visible-but-unmatched on frame 5, between the two blackouts.
+        results.append([] if frame == 5 else [[_snapshot(1, (0.0, 0.0), frame)][0]])
+
+    report = evaluate_id_consistency(gt_world, gt_visible, results, n_ids_issued=1)
+    assert report.longest_blackout_id_held[1] == 3, (
+        "two separate 3-frame blackouts must not be summed into 6; got "
+        f"{report.longest_blackout_id_held[1]}"
+    )
 
 
 def test_blackout_not_credited_if_id_changed_across_it() -> None:
@@ -158,7 +184,7 @@ def test_blackout_not_credited_if_id_changed_across_it() -> None:
 
     report = evaluate_id_consistency(gt_world, gt_visible, results, n_ids_issued=2)
     assert (
-        report.longest_coast_survived[1] == 0
+        report.longest_blackout_id_held[1] == 0
     ), "a blackout is credited only if the SAME id is held before and after it"
 
 

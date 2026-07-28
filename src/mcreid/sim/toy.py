@@ -129,10 +129,32 @@ class NoiseSpec:
 
 
 @dataclass(frozen=True)
+class StaticFalsePositive:
+    """A persistent detector hallucination at a fixed floor position.
+
+    Real detectors do not produce i.i.d. noise: they produce a coat rack, a
+    mannequin, or a poster that fires in the same place on every frame with a
+    stable appearance. That is the false positive that actually costs identities,
+    because it survives per-view tracking and reaches fusion; uniform per-frame
+    noise cannot form a tracklet and is filtered for free.
+    """
+
+    world_xy_m: tuple[float, float]
+    height_m: float = 1.70
+    width_m: float = 0.5
+    score: float = 0.72
+    camera_ids: tuple[str, ...] | None = None  # None = every camera
+
+    def visible_to(self, camera_id: str) -> bool:
+        return self.camera_ids is None or camera_id in self.camera_ids
+
+
+@dataclass(frozen=True)
 class ToySceneConfig:
     cameras: tuple[VirtualCamera, ...]
     agents: tuple[AgentSpec, ...]
     occlusions: tuple[OcclusionEvent, ...] = ()
+    static_false_positives: tuple[StaticFalsePositive, ...] = ()
     n_frames: int = 300
     fps: float = 30.0
     embed_dim: int = 128
@@ -255,6 +277,16 @@ def generate_scene(config: ToySceneConfig) -> ToyScene:
         len(agents), config.embed_dim, rng, noise.identity_similarity
     )
     biases = _camera_biases(len(cams), config.embed_dim, rng)
+    # Static FPs get their own stable identities, drawn from the same
+    # person-like distribution — a coat rack that looks nothing like a person
+    # would be trivially rejectable and would not test anything.
+    static_fp_protos = (
+        _identity_prototypes(
+            len(config.static_false_positives), config.embed_dim, rng, noise.identity_similarity
+        )[0]
+        if config.static_false_positives
+        else np.zeros((0, config.embed_dim))
+    )
     # Gaussian perturbations are scaled so their norm equals the configured
     # magnitude regardless of embed_dim (a raw N(0,1)^D vector has norm ~sqrt(D)).
     noise_scale = 1.0 / np.sqrt(config.embed_dim)
@@ -323,7 +355,31 @@ def generate_scene(config: ToySceneConfig) -> ToyScene:
                     )
                 )
 
-        # False positives: a detector hallucination somewhere on the floor.
+        # Persistent false positives — same place, every frame, stable appearance.
+        for fp_index, fp in enumerate(config.static_false_positives):
+            for cam in cams:
+                if not fp.visible_to(cam.camera_id):
+                    continue
+                box = cam.person_bbox(fp.world_xy_m, fp.height_m, fp.width_m)
+                if box is None:
+                    continue
+                embed = (
+                    static_fp_protos[fp_index]
+                    + noise.camera_bias * biases[cam_index[cam.camera_id]]
+                    + noise.embed_noise * noise_scale * rng.normal(size=config.embed_dim)
+                )
+                per_camera[cam.camera_id].append(
+                    ToyDetection(
+                        camera_id=cam.camera_id,
+                        frame=frame,
+                        bbox_xyxy=box + rng.normal(scale=noise.bbox_jitter_px, size=4),
+                        embedding=_normalise(embed),
+                        score=float(np.clip(rng.normal(fp.score, noise.score_std), 0.05, 0.999)),
+                        gt_agent_id=None,
+                    )
+                )
+
+        # Transient false positives: a hallucination somewhere on the floor.
         for cam in cams:
             if rng.random() >= noise.false_positive_rate:
                 continue
@@ -411,17 +467,27 @@ def cardboard_scene(
 ) -> ToySceneConfig:
     """The hero test, in simulation — the exact shape of the cardboard clip.
 
-    One agent walking a loop, occluded from one camera at a time, then two, then
-    three, then from *every* camera for ``blackout_s`` (the ship criterion),
+    Agent 1 walks a loop and is occluded from one camera at a time, then two,
+    then three, then from *every* camera for ``blackout_s`` (the ship criterion),
     followed by a ``tail_s`` reappearance window in which the ReID re-lock has to
     recover the same global ID. PASS = one global ID for the whole clip.
+
+    The scene deliberately contains **more than the hero agent**:
+
+    - a *distractor* who is never occluded and keeps walking through the room,
+      including near the hero's reappearance point. Without a second body, "zero
+      ID switches" is achievable by any tracker that never mints a second
+      confirmed ID — no identity reasoning is exercised at all, and a stateless
+      stub with no ReID, no filter and no lifecycle passes the gate outright.
+    - a *static false positive*, the detector hallucination class that actually
+      costs identities, since it forms a stable tracklet and reaches fusion.
 
     The schedule is defined in seconds and converted with ``fps``, so changing
     the frame rate keeps the physical timings identical.
     """
     cams = bedroom_rig(room=room)
     width, depth = room
-    agent = AgentSpec(
+    hero = AgentSpec(
         agent_id=1,
         waypoints_m=(
             (1.2, 1.2),
@@ -430,6 +496,15 @@ def cardboard_scene(
             (1.4, depth - 1.4),
         ),
         speed_mps=1.1,
+    )
+    # Crosses the room on a different heading and different phase, so it is
+    # near the hero at some point during the clip without walking through them.
+    distractor = AgentSpec(
+        agent_id=2,
+        waypoints_m=((width - 1.6, depth - 1.6), (1.6, 1.8)),
+        speed_mps=0.85,
+        height_m=1.62,
+        start_offset_m=1.3,
     )
 
     def f(seconds: float) -> int:
@@ -465,8 +540,16 @@ def cardboard_scene(
 
     return ToySceneConfig(
         cameras=cams,
-        agents=(agent,),
+        agents=(hero, distractor),
         occlusions=events,
+        # Sited to be visible in all four cameras — so it reliably forms a
+        # persistent track and genuinely stresses the tracker — while staying
+        # ~1.3 m clear of both agents' paths. Any closer and it stops testing the
+        # tracker and starts confounding the *metric*: when a real person walks
+        # within the evaluator's match radius of a stationary false track, the
+        # ground-truth Hungarian can legitimately attribute the person to it, and
+        # the resulting "ID switch" says nothing about the tracker.
+        static_false_positives=(StaticFalsePositive(world_xy_m=(0.6, 2.6)),),
         n_frames=n_frames,
         fps=fps,
         seed=seed,

@@ -84,6 +84,31 @@ class AppearanceGallery:
             return np.zeros((0, 0), dtype=np.float64)
         return np.stack(vectors, axis=0)
 
+    def robust_distance(self, embeddings: npt.ArrayLike, top_k: int = 3) -> FloatArray:
+        """Cosine distance using the mean of the ``top_k`` best gallery matches.
+
+        `distance` (1 - max similarity) is deliberately optimistic: it lets a
+        person seen from a new angle match their single most similar past view.
+        That is right for frame-to-frame association, but for irreversible
+        decisions — reviving a lost identity — the false-accept rate of a max
+        over a large gallery is far too high. Averaging the best few matches
+        keeps most of the viewpoint tolerance and rejects lucky single hits.
+        """
+        if top_k < 1:
+            raise ValueError(f"top_k must be >= 1, got {top_k}")
+        query = np.atleast_2d(np.asarray(embeddings, dtype=np.float64))
+        gallery = self.matrix()
+        if gallery.size == 0:
+            return np.ones(query.shape[0], dtype=np.float64)
+        if gallery.shape[1] != query.shape[1]:
+            raise ValueError(
+                f"embedding dim mismatch: query {query.shape[1]} vs gallery {gallery.shape[1]}"
+            )
+        similarity = query @ gallery.T
+        k = min(top_k, similarity.shape[1])
+        best = np.sort(similarity, axis=1)[:, -k:]
+        return 1.0 - best.mean(axis=1)
+
     def distance(self, embeddings: npt.ArrayLike) -> FloatArray:
         """Cosine distance from each of (N, D) ``embeddings`` to this gallery.
 
@@ -132,6 +157,20 @@ class AssociationConfig:
         for name in ("chi2_gate", "max_distance_m", "max_appearance_distance", "max_cost"):
             if getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be positive")
+        # Cosine distance between unit vectors is bounded by 2; a larger ceiling
+        # silently disables the appearance gate entirely.
+        if self.max_appearance_distance > 2.0:
+            raise ValueError(
+                f"max_appearance_distance must be <= 2 (the maximum cosine distance "
+                f"between unit vectors); {self.max_appearance_distance} disables the gate"
+            )
+        # Gated-out cells carry INFEASIBLE; a ceiling at or above it would accept
+        # every rejected pair and defeat every gate in the system at once.
+        if self.max_cost >= INFEASIBLE:
+            raise ValueError(
+                f"max_cost must be < {INFEASIBLE} (the gated-out sentinel), "
+                f"got {self.max_cost} — this would accept every rejected pair"
+            )
 
 
 def build_cost_matrix(
