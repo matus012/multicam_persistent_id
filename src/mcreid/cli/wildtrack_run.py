@@ -25,13 +25,14 @@ import numpy.typing as npt
 import typer
 
 from mcreid.eval.id_metrics import evaluate_id_consistency
-from mcreid.eval.wildtrack import load_annotations, load_rig
+from mcreid.eval.wildtrack import compute_moda_modp, load_annotations, load_rig
 from mcreid.eval.wildtrack_report import check_conversion
 from mcreid.fusion.associate import AssociationConfig
 from mcreid.fusion.dormant import DormantConfig
 from mcreid.fusion.global_id import FusionConfig, GlobalIDManager
 from mcreid.fusion.types import TrackState, ViewObservation
 from mcreid.track.gpu_view import GpuPerViewBackend, GpuViewConfig
+from mcreid.track.reid_models import DEFAULT_EMBEDDER
 from mcreid.utils.logging import get_logger, setup_logging
 from mcreid.utils.seed import DEFAULT_SEED, seed_everything
 from mcreid.viz.bev import BevRenderer
@@ -161,6 +162,9 @@ def run(
     n_frames: int = typer.Option(120, help="How many frames to process."),
     fps: float = typer.Option(2.0, help="Annotated-frame rate (WILDTRACK samples at 2 fps)."),
     weights: Path = typer.Option(Path("weights/yolo11x.pt"), help="Detector weights."),
+    embedder: str = typer.Option(
+        DEFAULT_EMBEDDER, help="Appearance model: osnet_x1_0_msmt17 | imagenet_resnet18."
+    ),
     imgsz: int = typer.Option(1280, help="Detector input size."),
     conf: float = typer.Option(0.25, help="Detection confidence floor."),
     match_radius_m: float = typer.Option(1.0, help="GT<->prediction match radius."),
@@ -197,7 +201,9 @@ def run(
     backends = {
         cam.camera_id: GpuPerViewBackend(
             cam.camera_id,
-            GpuViewConfig(weights=weights, imgsz=imgsz, conf_threshold=conf),
+            GpuViewConfig(
+                weights=weights, imgsz=imgsz, conf_threshold=conf, embedder=embedder
+            ),
         )
         for cam in rig.cameras
     }
@@ -301,6 +307,22 @@ def run(
                 if record.bboxes.get(camera_id) is not None:
                     gt_visible[record.person_id][slot, cam_index] = True
 
+    # MODA/MODP under the standard multi-view detection protocol, computed from
+    # the same pass so the detection and identity numbers describe one run.
+    predictions = [
+        np.stack([s.world_xy for s in snaps]) if snaps else np.zeros((0, 2))
+        for snaps in snapshots_per_frame
+    ]
+    truth = [
+        (
+            np.stack([r.world_xy for r in annotations.get(f, [])])
+            if annotations.get(f)
+            else np.zeros((0, 2))
+        )
+        for f in frame_indices
+    ]
+    detection_metrics = compute_moda_modp(predictions, truth, threshold_m=0.5)
+
     report = evaluate_id_consistency(
         gt_world=gt_world,
         gt_visible=gt_visible,
@@ -319,6 +341,7 @@ def run(
     summary = {
         "label": "geometric baseline, zero training",
         "mode": "geometry_only" if geometry_only else "geometry+appearance",
+        "embedder": embedder,
         "frames": n_frames,
         "cameras": len(rig.cameras),
         "ground_truth_people": len(person_ids),
@@ -328,6 +351,13 @@ def run(
         "total_id_switches": report.total_id_switches,
         "id_switches_per_person": report.total_id_switches / max(len(person_ids), 1),
         "mean_detections_per_frame": float(np.mean(detection_counts)),
+        "moda": detection_metrics.moda,
+        "modp": detection_metrics.modp,
+        "precision": detection_metrics.precision,
+        "recall": detection_metrics.recall,
+        "n_tp": detection_metrics.n_tp,
+        "n_fp": detection_metrics.n_fp,
+        "n_fn": detection_metrics.n_fn,
         "position_rmse_m": report.position_rmse_m,
         "coverage_visible": {k: round(v, 4) for k, v in report.coverage_visible.items()},
         "false_positive_tracks": report.false_positive_tracks,

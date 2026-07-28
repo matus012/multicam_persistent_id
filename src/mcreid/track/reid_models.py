@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import cv2
 import numpy as np
@@ -146,7 +146,8 @@ class _CropEmbedder:
         )
         self.model = self._build()
 
-    def _build(self):  # noqa: ANN202 - torch module, imported lazily
+    def _build(self) -> Any:
+        """Return an eval-mode torch module mapping crop tensors to features."""
         raise NotImplementedError
 
     def __call__(self, image: Image, boxes: FloatArray) -> FloatArray:
@@ -187,7 +188,7 @@ class _CropEmbedder:
 class ImageNetResnet18Embedder(_CropEmbedder):
     """The v1 baseline: an ImageNet trunk pressed into service as a ReID model."""
 
-    def _build(self):  # noqa: ANN202
+    def _build(self) -> Any:
         import torch
         from torchvision.models import ResNet18_Weights, resnet18
 
@@ -209,7 +210,7 @@ class OsnetEmbedder(_CropEmbedder):
         self._weights = weights
         super().__init__(spec, device, batch_size)
 
-    def _build(self):  # noqa: ANN202
+    def _build(self) -> Any:
         import torch
 
         from mcreid.track.vendor.osnet import osnet_x1_0

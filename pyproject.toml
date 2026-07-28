@@ -49,6 +49,7 @@ mcreid-demo = "mcreid.cli.demo:app"
 mcreid-sync = "mcreid.cli.sync:app"
 mcreid-eval = "mcreid.cli.eval_wildtrack:app"
 mcreid-wildtrack = "mcreid.cli.wildtrack_run:app"
+mcreid-wildtrack-demo = "mcreid.cli.wildtrack_demo:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

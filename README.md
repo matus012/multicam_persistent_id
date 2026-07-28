@@ -1,109 +1,110 @@
 # mcreid — multi-camera persistent-ID tracking with a live BEV map
 
-Four indoor cameras, one global ID per person. A person entering any view gets an
-identity and keeps it across camera handoffs and through occlusions — including
-being hidden from **every** camera at once.
+Multiple overlapping cameras, one global ID per person. Someone entering any
+view gets an identity and keeps it across camera handoffs, through occlusions,
+and across absences of minutes.
 
-Zero training. Pretrained detector, pretrained ReID, geometric late fusion.
+**Zero training by us.** Every component is off-the-shelf and pretrained by
+someone else — YOLO11x on COCO for detection, OSNet on MSMT17 for appearance —
+and none of them has seen the evaluation data. The fusion is geometric.
 
-![4-view + BEV demo](docs/assets/cardboard_demo.gif)
+![demo](docs/assets/wildtrack_demo.gif)
 
-*Four camera views and the bird's-eye-view map. The hero is progressively
-occluded — one camera, then two, then three, then all four — while a second
-person and a persistent false positive keep being tracked alongside. The hero's
-BEV dot switches to a hollow coasting ring, holds its ID through the 2.5 s total
-blackout, and re-locks on the same ID when they reappear.*
+*Three WILDTRACK cameras and the bird's-eye map. Watch one number and one colour
+follow a person from camera to camera — that agreement is the entire claim.*
 
-> **Status: G-M1-1 complete.** The numbers below are from the scripted synthetic
-> scene, which reproduces the real capture protocol exactly. The recorded-footage
-> demo (G-M1-2) is blocked on the capture session — see
-> [capture_guide.md](capture_guide.md). Repo is private.
+---
 
 ## Results
 
-### Occlusion survival — synthetic cardboard scene, 5 seeds
+### Real footage — WILDTRACK
 
-420 frames, 4 cameras. Scripted occlusions escalate from one blocked view to all
-four. The scene contains the hero **plus a second person and a persistent false
-positive** — see "why the scene has distractors" below.
+7 static cameras over a public square, 400 annotated frames at 2 fps, 1920×1080.
+Nothing here is fine-tuned. Full write-up: [docs/wildtrack_results.md](docs/wildtrack_results.md).
 
-| metric | result | target |
-|---|---|---|
-| ID switches | **0** (all 5 seeds) | 0 |
-| ID held across total blackout | **75 frames = 2.50 s** | 2-3 s |
-| BEV dot alive during blackout | **75 / 75 frames** | full |
-| prediction within 1 m of truth during blackout | 38 frames = 1.27 s | reported, not gated |
-| mean coast drift during blackout | 0.88 m | reported, not gated |
-| coverage while visible | 98.8 % | > 95 % |
-| ground-plane position RMSE | 0.22 m | — |
+<!-- RESULTS_TABLE_START -->
+_Regenerate with `python scripts/make_results_table.py reports/wildtrack/eval_*/summary.json`_
+<!-- RESULTS_TABLE_END -->
 
-Note the honest split: the BEV dot survives the **whole** blackout and the
-identity is retained, but constant-velocity coasting only stays accurate for
-about the first half of it. The last part of the identity is recovered by the
-ReID re-lock on reappearance, not by the motion model. The demo prints both
-numbers and the gate asserts the first.
+MVDet is trained *on WILDTRACK*; this is zero-shot. The comparison is included
+for scale, not as a claim of parity.
 
-The tracker is scored against a ReID model deliberately calibrated to published
-person-ReID difficulty — same-identity cross-camera cosine similarity ~0.73,
-different-identity ~0.45. Orthogonal random embeddings would make this gate
-meaningless.
+### The appearance model is the whole story
 
-### Why the scene has distractors
+Cross-camera cosine distance, measured on real WILDTRACK crops with
+ground-truth identities:
 
-An earlier version of this gate had one person in the scene and reported the same
-"0 ID switches". That number was worthless. With a single agent, zero switches is
-achieved by any tracker that never mints a second *confirmed* ID — an adversarial
-review demonstrated that a **stateless 30-line stub** with no ReID, no Kalman
-filter, no coasting and no lifecycle passed all five seeds, and beat the real
-tracker's position error while doing it.
+| embedder | same person, diff. camera | different person, diff. camera | separation |
+|---|---|---|---|
+| ImageNet ResNet-18 (not a ReID model) | 0.377 | 0.409 | **0.032** |
+| OSNet, MSMT17-trained | 0.525 | 0.623 | **0.098** |
 
-The gate now includes a second person and a persistent false positive (the
-detector-hallucination class that actually costs identities, since it forms a
-stable tracklet instead of being filtered as per-frame noise). The same stub now
-fails every seed at 19 % coverage. `longest_blackout_id_held` was also split from
-`longest_blackout_alive` because the original metric credited a tracker that
-emitted *nothing* for the whole occlusion and re-acquired afterwards.
+The v1 stack used the ImageNet trunk, whose distributions essentially overlap —
+no threshold separates them, and a `--geometry-only` ablation changed almost
+nothing. Swapping in a real ReID model is a 3× improvement in separation and the
+single biggest lever in the project.
 
-### Calibration accuracy
+### Synthetic scenario suite
 
-End-to-end validation of `mcreid-calibrate` against a synthetic capture session
-laid out exactly as `capture_guide.md` prescribes (checkerboard video per phone +
-AprilTag floor frames), scored against the known ground-truth cameras:
+The synthetic generator's appearance model is **fitted to the measured OSNet
+operating point above**, not to published ReID numbers. That distinction matters:
+published numbers describe a model trained on the target domain and are ~8×
+easier than the zero-shot reality this stack ships. Gates calibrated against the
+easy distribution passed while the real system under-merged badly.
+
+| scenario | result |
+|---|---|
+| cardboard (1 hero + distractor + persistent false positive, 2.5 s total occlusion) | hero holds its ID on 4/5 seeds; ≤1 switch on any seed |
+| BEV dot alive through the blackout | 75/75 frames, all seeds |
+| long-gap re-ID (75 s absence, distractor present throughout) | 0 switches, identity recovered on all seeds |
+| adversarial long-gap (stranger present only during the absence) | stranger never inherits the dormant ID |
+
+### Calibration
 
 | quantity | result |
 |---|---|
-| focal length error | < 0.4 % |
-| principal point error | 1–8 px |
-| intrinsics reprojection RMS | 0.41 px |
+| focal length error (synthetic capture) | < 0.4 % |
 | ground homography residual | 0.1 cm |
-| **floor position error, image → world** | **4–16 mm mean, 48 mm worst case** |
+| image → world floor position error | 4–16 mm mean |
+| WILDTRACK converter cross-check vs dataset GT | 3–15 px median per camera |
 
-### Known limitation — two people crossing
+---
 
-The secondary scenario (two people whose paths intersect, passing within ~0.5 m)
-gives **0-4 ID switches depending on seed**, not zero. This is a real limit of a
-zero-training geometric baseline: when two targets occupy nearly the same floor
-position, geometry is uninformative and a pretrained ReID embedding is the only
-discriminator. It is explicitly **not** a v1 gate. See
-[`scripts/README_v2_synthetic_engine.md`](scripts/README_v2_synthetic_engine.md)
-for what fixing it would take.
+## How it works
 
-### WILDTRACK
+```mermaid
+flowchart LR
+  subgraph PerCamera["per camera (xN)"]
+    D[YOLO11x<br/>detection] --> T[tracklets<br/>IoU + appearance]
+    T --> E[OSNet<br/>ReID embedding]
+  end
+  E --> V[ViewObservation]
+  V --> G[foot point → ground plane<br/>via homography]
+  G --> A[per-camera Hungarian<br/>Mahalanobis + ReID cosine]
+  A --> M[global ID manager]
+  M --> BEV[BEV map + overlays]
 
-Public-benchmark evaluation is G-M1-3. The loaders, grid conversions and
-MODA/MODP scoring are implemented and unit-tested; **no numbers are reported
-yet** because the dataset has not been run. When it is, it will be a single row
-labelled *"geometric baseline, no multi-view training"* alongside published
-MVDet figures. No parity is claimed — MVDet is trained on multi-view data and
-this is not.
-
-```bash
-python scripts/download_wildtrack.py info
+  M -.-> R1[live association]
+  M -.-> R2[motion-gated revival<br/>seconds]
+  M -.-> R3[dormant gallery<br/>minutes, appearance only]
 ```
 
-WILDTRACK sits behind an EPFL consent gate, so the helper prints the request
-instructions and verifies an archive you download yourself. It does not scrape
-or bypass anything.
+Identity recovery is a three-stage ladder, each less constrained than the last,
+tried in order:
+
+1. **Live association** — per-camera Hungarian on ground distance blended with
+   ReID cosine. Geometry and appearance both vote.
+2. **Motion-gated revival** — "could they have walked here in the time they were
+   missing?" Serves occlusions of seconds.
+3. **Dormant gallery** — appearance only, no position claim, 10-minute TTL.
+   Serves absences of minutes. Because nothing constrains it but appearance it is
+   the strictest stage: tighter threshold, top-k mean instead of max-similarity,
+   and a ratio test that resurrects nothing when two identities fit comparably.
+
+Design decisions worth knowing, all forced by measurement rather than taste, are
+in [context.md](context.md) §4.
+
+---
 
 ## Quickstart
 
@@ -111,121 +112,94 @@ or bypass anything.
 uv venv --python 3.11 && uv pip install -e ".[dev]"
 ```
 
-Run the full pipeline and export the demo — no footage, no GPU, no dataset:
+Run the whole pipeline on a scripted scene — no footage, no GPU, no dataset:
 
 ```bash
 uv run mcreid-demo synthetic --scenario cardboard
 ```
 
-That command runs per-view tracking, ground projection, cross-view association
-and the global ID manager, scores identity consistency, writes
-`outputs/demo/cardboard.mp4` + `.gif`, and exits non-zero if the cardboard
-criterion fails. It is the same code path the recorded demo uses; only the
-detector front-end differs.
-
-Other entry points:
+Install the perception stack (CUDA 12.6) for anything involving real video:
 
 ```bash
-uv run mcreid-demo synthetic --scenario crossing
+uv pip install -e ".[perception]" --extra-index-url https://download.pytorch.org/whl/cu126
+```
+
+### WILDTRACK
+
+```bash
+python scripts/download_wildtrack.py fetch
 ```
 
 ```bash
-uv run pytest
+uv run mcreid-wildtrack calib-report --root data/wildtrack_full
 ```
 
-## How it works
-
-Late fusion, locked architecture:
-
-```
-per camera:  detection -> tracking -> ReID embedding
-                          |
-                          v  ViewObservation
-             foot point -> ground-plane homography
-                          |
-                          v  GroundObservation (+ covariance)
-             per-camera Hungarian vs the global track set
-                          |
-                          v
-             global ID manager:  birth / coast / lost / ReID revive / merge
-                          |
-                          v
-             BEV canvas + 4-view mosaic
+```bash
+uv run mcreid-wildtrack run --root data/wildtrack_full --n-frames 400
 ```
 
-Association blends a Mahalanobis ground-plane distance with ReID cosine distance.
-Because the positional covariance grows while a track coasts unobserved, geometry
-gracefully stops discriminating exactly when it should, and appearance takes over
-— which is what makes the post-blackout re-lock work.
-
-Three details that turned out to matter more than the architecture:
-
-- **The ground covariance needs a world-space error floor.** Propagating pixel
-  noise through the homography Jacobian alone underestimates true projection
-  error by ~5x, because a detection box's bottom edge is not the ground-contact
-  point. Without the floor, the Mahalanobis gate collapses and one person
-  shatters into an ID per frame.
-- **Duplicate tracks must be merged.** Assignment is one-to-one *per camera*, so
-  leftover observations legitimately birth a second track on top of an existing
-  one. Both then survive and the reported identity flips between them every frame.
-- **Coasting velocity must be damped, and revival must see coasting tracks.**
-  Undamped constant velocity slides ~2.7 m away over a 2.5 s blackout; and if
-  ReID revival only considers fully-lost tracks, a still-coasting track gets a
-  fresh ID minted for a target the system is actively tracking.
-
-Each was found by measuring, not by inspection. See `context.md` §4.
-
-A fourth, found by adversarial review: merge seniority ranked `COASTING` below
-`CONFIRMED`, so a freshly-confirmed 3-hit track could absorb — and rename — a
-500-hit identity that happened to be behind the cardboard at that moment. That is
-exactly the failure this project exists to prevent, and it was invisible on a
-single-agent scene because nothing else ever confirmed.
-
-## Repo layout
-
-```
-src/mcreid/
-  calib/    calib.json schema, checkerboard intrinsics, AprilTag ground homography
-  sim/      virtual cameras, scripted toy scenes, synthetic frame rendering
-  track/    per-view tracking (torch-free CI path; GPU path lands with G-M1-2)
-  fusion/   ground Kalman, appearance gallery, association, global ID manager
-  eval/     identity-consistency metrics, WILDTRACK protocol
-  viz/      BEV canvas, per-view overlays, demo mosaic
-  cli/      mcreid-calibrate, mcreid-demo, mcreid-sync, mcreid-eval
+```bash
+uv run mcreid-wildtrack-demo render --root data/wildtrack_full --n-frames 120
 ```
 
-- `context.md` — scope, architecture, locked conventions, design rationale
-- `status.txt` — current phase, blockers, next steps
-- `capture_guide.md` — the recording protocol for the real 4-camera session
-
-## Calibration
+### Your own cameras
 
 ```bash
 uv run mcreid-calibrate rig --capture-dir footage/calib --square-size-m 0.025
 ```
 
-Per-camera intrinsics from a checkerboard, ground-plane homography from AprilTag
-36h11 markers laid flat on the floor (or four measured floor points). Writes one
-`calib.json` for the whole rig. `mcreid-calibrate check` re-verifies round-trip
-accuracy.
-
-Clip alignment for independently-started phones:
-
 ```bash
-uv run mcreid-sync --footage footage/take3
+uv run mcreid-calibrate report --calib calib/rig.json --capture-dir footage/calib
 ```
 
-## Constraints and honesty notes
+`report` is a hard gate: it renders a metric floor grid into every view and
+refuses to pass a calibration that does not reproduce it. See
+[capture_guide.md](capture_guide.md) for the recording protocol.
 
-- Runtime target is >= 15 FPS aggregate on 4x 720p, RTX 4060 8 GB. The
-  **end-to-end** figure is not measured yet — the GPU front-end lands with
-  G-M1-2. What *is* measured: per-view tracking plus fusion costs 1.0 ms/frame
-  for one person and 2.1 ms/frame for two across 4 cameras, i.e. 1.5–3 % of the
-  66.7 ms budget. Effectively the whole budget is available to the detector.
-- All reported numbers come from the synthetic scene. No real-footage or
-  benchmark numbers are claimed yet.
-- Datasets, weights, footage and room calibration are never committed.
+---
+
+## Honest limitations
+
+- **Crowds break identity.** On WILDTRACK the tracker under-merges: many people
+  are held as separate per-camera identities rather than one fused track. Even
+  with OSNet, a zero-shot embedder cannot reliably confirm that two views show
+  the same stranger among dozens of similar-looking people.
+- **Runtime is not real-time at 7×1080p.** Measured on an RTX 4060 Laptop; the
+  numbers are in the results table and no target is claimed for that load.
+  Detection dominates — per-view tracking plus fusion costs 1–2 ms/frame.
+- **"Zero training" means zero training *by us*.** The detector and the ReID
+  model are both pretrained on public data. Neither has seen WILDTRACK, so the
+  evaluation is zero-shot, but this is not a from-scratch system and is not
+  claimed to be.
+- **Coasting is short-lived accuracy.** Through a 2.5 s total occlusion the BEV
+  dot survives the whole time and the identity is retained, but the
+  constant-velocity prediction only stays within a metre of truth for about half
+  of it. The rest of the identity is recovered by the ReID re-lock, not by the
+  motion model.
+- **The synthetic suite is a proxy, not proof.** It is now fitted to a measured
+  operating point, but it still models appearance as a vector plus noise. It
+  caught none of the failures that real footage exposed.
+
+---
+
+## Repo layout
+
+```
+src/mcreid/
+  calib/    calib.json schema, intrinsics, ground homography, projection, sanity report
+  sim/      virtual cameras, scripted scenes, synthetic rendering
+  track/    per-view tracking; CPU path and GPU path (YOLO + selectable ReID)
+  fusion/   ground Kalman, appearance gallery, association, global IDs, dormant gallery
+  eval/     identity metrics, WILDTRACK protocol (MODA/MODP)
+  viz/      BEV canvas, overlays, demo composition
+  cli/      calibrate · demo · sync · eval · wildtrack · wildtrack-demo
+```
+
+- [context.md](context.md) — scope, locked architecture, design rationale
+- [status.txt](status.txt) — current phase, blockers, next steps
+- [docs/wildtrack_results.md](docs/wildtrack_results.md) — real-footage validation
 
 ## Licence
 
-AGPL-3.0-only.
+AGPL-3.0-only. Vendored OSNet architecture is MIT (see
+`src/mcreid/track/vendor/osnet.py`).
