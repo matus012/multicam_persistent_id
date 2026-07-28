@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -47,21 +48,36 @@ _REQUIRED_SUBDIRS = ("Image_subsets", "annotations_positions", "calibrations")
 _EXPECTED_ANNOTATION_FRAMES = 400
 _EXPECTED_CAMERAS = 7
 
+# EPFL CVLab publishes the annotated archive as a plain link on the dataset
+# page — no form, no consent gate, no credentials. Verified reachable with a
+# 200 and Content-Type: application/zip. If that ever changes to a gated flow,
+# fall back to `install --archive` and do NOT try to work around the gate.
+ARCHIVE_URL = (
+    "http://documents.epfl.ch/groups/c/cv/cvlab-unit/www/data/Wildtrack/"
+    "Wildtrack_dataset_full.zip"
+)
+
 _INSTRUCTIONS = f"""
-WILDTRACK is distributed by EPFL CVLab and requires a manual request/consent
-step before download. This tool will not scrape, guess, or bypass that step.
+WILDTRACK is published by EPFL CVLab. As of this writing the annotated archive
+is a direct download, so the normal path is:
+
+    python scripts/download_wildtrack.py fetch
+
+which downloads, checksums and extracts it into {DEFAULT_DATA_ROOT}.
+
+If EPFL later puts the archive behind a request form or EULA, that flow will
+stop working. Do not attempt to bypass it — instead:
 
   1. Visit {DATASET_HOMEPAGE}
-  2. Follow EPFL's request/download instructions there (they may ask you to
-     agree to dataset terms and/or fill in a request form).
-  3. Save the downloaded archive somewhere on this machine.
+  2. Follow whatever request/consent steps they ask for.
+  3. Save the archive somewhere on this machine.
   4. Run:
        python scripts/download_wildtrack.py install --archive <path-to-archive>
 
-     Add --expected-sha256 <hash> once you know the hash you want to pin
-     (the first run without it will print the observed hash for you to save).
+Either way, add --expected-sha256 <hash> once you know the hash you want to
+pin; the first run without it prints the observed hash for you to save.
 
-This command does not download anything on your behalf.
+The dataset is never committed: data/ is gitignored.
 """
 
 
@@ -189,6 +205,57 @@ _ARCHIVE_OPTION = typer.Option(
     ..., exists=True, dir_okay=False, help="Path to the archive you downloaded."
 )
 _DEST_OPTION = typer.Option(DEFAULT_DATA_ROOT, help="Where to install the dataset.")
+
+
+@app.command()
+def fetch(
+    dest: Path = _DEST_OPTION,
+    cache_dir: Path = typer.Option(
+        Path("data/downloads"), help="Where the archive is kept between runs."
+    ),
+    url: str = typer.Option(ARCHIVE_URL, help="Archive URL."),
+    expected_sha256: str = typer.Option("", help="Pin and verify the archive's SHA-256."),
+    force: bool = typer.Option(False, help="Re-download and overwrite an existing install."),
+    log_level: str = typer.Option("INFO"),
+) -> None:
+    """Download, checksum, extract and validate WILDTRACK in one step.
+
+    Resumes a partial download rather than restarting it — the archive is large
+    enough that a dropped connection should not cost the whole transfer.
+    """
+    setup_logging(log_level)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive = cache_dir / Path(url).name
+
+    if archive.is_file() and not force:
+        typer.echo(f"using cached archive {archive} ({archive.stat().st_size / 1e9:.2f} GB)")
+    else:
+        typer.echo(f"downloading {url}\n  -> {archive}")
+        command = [
+            "curl", "-L", "--fail", "--retry", "3", "--retry-delay", "5",
+            "-C", "-", "-o", str(archive), url,
+        ]  # fmt: skip
+        try:
+            completed = subprocess.run(command, check=False)
+        except FileNotFoundError as exc:
+            raise typer.BadParameter(
+                "curl not found on PATH. Install it, or download the archive yourself "
+                "and use `install --archive <path>`."
+            ) from exc
+        if completed.returncode != 0:
+            typer.echo(
+                f"download failed (curl exit {completed.returncode}). The archive is "
+                "resumable — re-run this command to continue from where it stopped."
+            )
+            raise typer.Exit(code=1)
+
+    install(
+        archive=archive,
+        dest=dest,
+        expected_sha256=expected_sha256,
+        force=force,
+        log_level=log_level,
+    )
 
 
 @app.command()

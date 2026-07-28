@@ -65,6 +65,7 @@ ignore = ["ANN401"]
 "tests/*" = ["ANN201", "ANN001"]
 # typer's entire API is `def cmd(x: T = typer.Option(...))`; B008 is unavoidable here.
 "src/mcreid/cli/*" = ["B008"]
+"scripts/*" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

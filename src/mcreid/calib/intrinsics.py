@@ -112,7 +112,7 @@ def calibrate_intrinsics_from_corners(
 
     # cv2's type stubs do not model the "pass None to let OpenCV allocate"
     # overload, which is the documented way to calibrate from scratch.
-    rms, K, dist, _rvecs, _tvecs = cv2.calibrateCamera(  # type: ignore[call-overload]
+    rms, K, dist, _rvecs, _tvecs = cv2.calibrateCamera(
         object_points, image_points, image_size, None, None
     )
     logger.info(
