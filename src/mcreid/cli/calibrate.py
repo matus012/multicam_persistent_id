@@ -25,11 +25,17 @@ from typing import Any
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import typer
 import yaml
 
 from mcreid.calib.homography import TagPlacement, ground_plane_from_apriltags
-from mcreid.calib.intrinsics import CheckerboardSpec, calibrate_intrinsics_from_dir
+from mcreid.calib.intrinsics import (
+    CheckerboardSpec,
+    calibrate_intrinsics_from_dir,
+    calibrate_intrinsics_from_video,
+    sharpness,
+)
 from mcreid.calib.schema import CameraCalib, RigCalib
 from mcreid.utils.logging import get_logger, setup_logging
 
@@ -70,6 +76,76 @@ def load_tag_placements(path: Path) -> list[TagPlacement]:
     return placements
 
 
+VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi")
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
+
+
+def find_intrinsics_source(camera_dir: Path) -> Path:
+    """Locate a camera's checkerboard capture — a video or a directory of stills.
+
+    The capture guide tells Matus to shoot `cam0/intrinsics.mp4`, because phones
+    record video far more easily than they export bursts of stills. Both layouts
+    are accepted so neither the guide nor an ad-hoc capture can be "wrong".
+    """
+    for suffix in VIDEO_SUFFIXES:
+        candidate = camera_dir / f"intrinsics{suffix}"
+        if candidate.is_file():
+            return candidate
+    directory = camera_dir / "intrinsics"
+    if directory.is_dir():
+        return directory
+    raise FileNotFoundError(
+        f"{camera_dir.name}: expected {camera_dir / 'intrinsics.mp4'} or "
+        f"{directory}/ with checkerboard frames"
+    )
+
+
+def find_ground_frame(capture_dir: Path, camera_id: str) -> Path:
+    """Locate the frame showing the floor AprilTags for one camera."""
+    candidates = [
+        *(capture_dir / "tags" / f"{camera_id}{s}" for s in (*IMAGE_SUFFIXES, *VIDEO_SUFFIXES)),
+        *(capture_dir / camera_id / f"ground{s}" for s in (*IMAGE_SUFFIXES, *VIDEO_SUFFIXES)),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"{camera_id}: no AprilTag frame found. Expected "
+        f"{capture_dir / 'tags' / (camera_id + '.jpg')} or "
+        f"{capture_dir / camera_id / 'ground.jpg'}"
+    )
+
+
+def read_frame(path: Path) -> npt.NDArray[np.uint8]:
+    """Read a still, or the sharpest of the first second of a video."""
+    if path.suffix.lower() in IMAGE_SUFFIXES:
+        raw = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if raw is None:
+            raise OSError(f"could not read image: {path}")
+        return np.asarray(raw, dtype=np.uint8)
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise OSError(f"could not open video: {path}")
+    best: npt.NDArray[np.uint8] | None = None
+    best_score = -1.0
+    try:
+        for _ in range(30):
+            ok, frame = capture.read()
+            if not ok:
+                break
+            image = np.asarray(frame, dtype=np.uint8)
+            score = sharpness(image)
+            if score > best_score:
+                best_score, best = score, image
+    finally:
+        capture.release()
+    if best is None:
+        raise OSError(f"{path}: no readable frames")
+    logger.info("%s: picked sharpest of the first 30 frames (score %.1f)", path.name, best_score)
+    return best
+
+
 @app.command()
 def rig(
     capture_dir: Path = typer.Option(..., help="Directory holding per-camera calibration capture."),
@@ -98,7 +174,9 @@ def rig(
         inner_corners=(board_cols, board_rows), square_size_m=square_size_m
     )
 
-    camera_dirs = sorted(d for d in capture_dir.iterdir() if d.is_dir())
+    camera_dirs = sorted(
+        d for d in capture_dir.iterdir() if d.is_dir() and d.name not in {"tags"}
+    )
     if not camera_dirs:
         raise typer.BadParameter(f"no per-camera subdirectories in {capture_dir}")
 
@@ -117,13 +195,19 @@ def rig(
         camera_id = camera_dir.name
         typer.echo(f"--- {camera_id} ---")
 
-        intrinsics_dir = camera_dir / "intrinsics"
-        if not intrinsics_dir.is_dir():
-            failures.append(f"{camera_id}: missing {intrinsics_dir}")
+        try:
+            source = find_intrinsics_source(camera_dir)
+        except FileNotFoundError as exc:
+            failures.append(str(exc))
             continue
-        intrinsics = calibrate_intrinsics_from_dir(intrinsics_dir, spec, min_views=min_views)
+        intrinsics = (
+            calibrate_intrinsics_from_dir(source, spec, min_views=min_views)
+            if source.is_dir()
+            else calibrate_intrinsics_from_video(source, spec, min_views=min_views)
+        )
         typer.echo(
-            f"  intrinsics: {intrinsics.n_views} views, RMS {intrinsics.rms_reproj_px:.3f} px"
+            f"  intrinsics: {intrinsics.n_views} views from {source.name}, "
+            f"RMS {intrinsics.rms_reproj_px:.3f} px"
         )
         if intrinsics.rms_reproj_px > max_rms_px:
             failures.append(
@@ -132,18 +216,12 @@ def rig(
             )
             continue
 
-        ground_image = next(
-            (p for p in (camera_dir / "ground.jpg", camera_dir / "ground.png") if p.is_file()),
-            None,
-        )
-        if ground_image is None:
-            failures.append(f"{camera_id}: no ground.jpg/ground.png with the floor tags")
+        try:
+            ground_frame = find_ground_frame(capture_dir, camera_id)
+            image = read_frame(ground_frame)
+        except (FileNotFoundError, OSError) as exc:
+            failures.append(str(exc))
             continue
-        raw = cv2.imread(str(ground_image), cv2.IMREAD_COLOR)
-        if raw is None:
-            failures.append(f"{camera_id}: could not read {ground_image}")
-            continue
-        image = np.asarray(raw, dtype=np.uint8)
         if (image.shape[1], image.shape[0]) != intrinsics.image_size:
             failures.append(
                 f"{camera_id}: ground frame is {image.shape[1]}x{image.shape[0]} but "

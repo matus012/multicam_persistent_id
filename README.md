@@ -38,6 +38,20 @@ person-ReID difficulty — same-identity cross-camera cosine similarity ~0.73,
 different-identity ~0.45. Orthogonal random embeddings would make this gate
 meaningless.
 
+### Calibration accuracy
+
+End-to-end validation of `mcreid-calibrate` against a synthetic capture session
+laid out exactly as `capture_guide.md` prescribes (checkerboard video per phone +
+AprilTag floor frames), scored against the known ground-truth cameras:
+
+| quantity | result |
+|---|---|
+| focal length error | < 0.4 % |
+| principal point error | 1–8 px |
+| intrinsics reprojection RMS | 0.41 px |
+| ground homography residual | 0.1 cm |
+| **floor position error, image → world** | **4–16 mm mean, 48 mm worst case** |
+
 ### Known limitation — two people crossing
 
 The secondary scenario (two people whose paths intersect, passing within ~0.5 m)
