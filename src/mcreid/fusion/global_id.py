@@ -32,7 +32,12 @@ from mcreid.fusion.associate import (
     build_cost_matrix,
     linear_assignment,
 )
-from mcreid.fusion.dormant import DormantConfig, DormantGallery
+from mcreid.fusion.dormant import (
+    REJECTED_AMBIGUOUS,
+    REJECTED_GATE,
+    DormantConfig,
+    DormantGallery,
+)
 from mcreid.fusion.motion import GroundKalman
 from mcreid.fusion.types import (
     GlobalTrackSnapshot,
@@ -269,6 +274,12 @@ class GlobalTrack:
         is worth re-storing later. Folding them together makes a brief second
         visit — a few frames — fail the gallery's min_hits and delete the
         identity permanently."""
+        self.suspected_same_as: int | None = None
+        """A dormant identity this track probably *is*, having missed it by a hair.
+
+        Set when this track's probe was rejected just outside the gate; carried
+        into the dormant gallery when the track retires, where it lets the ratio
+        test tell "two records of one person" from "two different people"."""
         self._config = config
 
     # --- properties -------------------------------------------------------
@@ -960,7 +971,15 @@ class GlobalIDManager:
         candidates = [
             t
             for t in self.tracks
-            if t.state is TrackState.TENTATIVE and t.hits >= 2 and len(t.gallery) > 0
+            if t.state is TrackState.TENTATIVE
+            and t.hits >= 2
+            and len(t.gallery) > 0
+            # A track that already adopted an identity is done shopping. It stays
+            # TENTATIVE until it earns confirmation, so without this it probes
+            # again every frame and can hop to a *second* stored record of the
+            # same person — trading the identity it just correctly recovered for
+            # the duplicate that recovery was meant to retire.
+            and t.inherited_hits == 0
         ]
         if not candidates:
             return
@@ -986,7 +1005,10 @@ class GlobalIDManager:
         if not usable:
             return
 
-        for index, global_id, distance in self.dormant.match(np.stack(queries), contexts):
+        matches = self.dormant.match(np.stack(queries), contexts)
+        self._record_near_misses(usable, frame)
+
+        for index, global_id, distance in matches:
             track = usable[index]
             entry = self.dormant.pop(global_id)
             old_id = track.global_id
@@ -995,6 +1017,10 @@ class GlobalIDManager:
             # Adopt the identity, not the confirmation: the candidate still has
             # to accumulate n_init measured frames like any other track.
             track.inherited_hits = entry.hits
+            # The track *is* this identity now, so any suspicion that it might be
+            # is spent. Leaving it set would re-link the identity to itself on the
+            # next retirement.
+            track.suspected_same_as = None
             self._remap_assignment(old_id, global_id)
             logger.info(
                 "frame %d: candidate track (was id %d) ADOPTED dormant global id %d "
@@ -1004,6 +1030,51 @@ class GlobalIDManager:
                 global_id,
                 frame - entry.retired_frame,
                 distance,
+            )
+
+    def _record_near_misses(self, usable: list[GlobalTrack], frame: int) -> None:
+        """Remember which identity a rejected probe *nearly* matched.
+
+        A probe that misses the gate by a hair is the observable signature of a
+        failed resurrection: the very next thing that happens is a fresh ID being
+        minted for someone the system already knows. When this track eventually
+        retires, that note stops it being stored as a *rival* record of the
+        identity it nearly matched — which is what deadlocks the ratio test
+        permanently.
+
+        The note is deliberately NOT used to decide who the person is. Measured
+        on real crops it points at the wrong person 45% of the time in a
+        two-entry gallery, so trusting it to assign an identity would hand people
+        each other's IDs. Trusting it only to *withhold storage* turns that same
+        45% into a recall cost — someone is forgotten and gets a fresh ID next
+        visit. See DormantConfig.near_miss_margin.
+        """
+        margin = self.dormant.config.near_miss_margin
+        if margin <= 0.0:
+            return
+        ceiling = self.dormant.config.appearance_distance + margin
+        for attempt in self.dormant.last_attempts:
+            if attempt.outcome not in (REJECTED_GATE, REJECTED_AMBIGUOUS):
+                continue
+            best = attempt.best
+            if best is None or attempt.query_index >= len(usable):
+                continue
+            candidate_id, distance = best
+            if distance > ceiling:
+                continue
+            track = usable[attempt.query_index]
+            if candidate_id == track.global_id:
+                continue
+            track.suspected_same_as = candidate_id
+            logger.info(
+                "frame %d: track id %d missed dormant id %d by %.3f (gate %.2f, "
+                "margin %.2f) — recording it as probably the same person",
+                frame,
+                track.global_id,
+                candidate_id,
+                distance,
+                self.dormant.config.appearance_distance,
+                margin,
             )
 
     def _retire_dead(self, frame: int) -> None:
@@ -1033,6 +1104,7 @@ class GlobalIDManager:
                     hits=max(track.hits, track.inherited_hits),
                     cameras_seen=track.gallery.cameras,
                     last_world_xy=track.last_measured_xy,
+                    same_as=track.suspected_same_as,
                 )
         self.tracks = survivors
 

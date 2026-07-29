@@ -164,23 +164,41 @@ class DormantConfig:
     """The best candidate must be at least this much better than the runner-up
     (best <= ratio * second_best). Applied only when two or more candidates pass
     the gate. Ambiguous evidence resurrects nothing."""
-    duplicate_distance: float = 0.48
-    """Entry-to-entry distance below which two *dormant identities* are judged to
-    be the same person, and collapsed into one. ``0.0`` disables the check.
+    near_miss_margin: float = 0.0
+    """Duplicate suppression for a **single-occupant** gallery. ``0.0`` = OFF,
+    which is the default. ``0.10`` is the validated value when enabling it.
 
-    This is the escape hatch for a self-deadlock the ratio test creates on its
-    own. The ratio test asks "do two candidates fit comparably well?" and
-    assumes that means *two different people, indistinguishable*. But one failed
-    resurrection puts a **second copy of the same person** in the gallery, and
-    from then on the two best candidates are always comparably close — because
-    they are the same person — so every future return is rejected as ambiguous.
-    One miss would otherwise disable long-gap re-ID permanently.
+    What it addresses: the ratio test deadlocks itself. It asks "do two
+    candidates fit comparably well?" and treats yes as "two different people,
+    indistinguishable". But one failed resurrection stores a second copy of the
+    same person under a new ID, and from then on the two best candidates are
+    always comparably close — because they are the same person — so every later
+    return is rejected as ambiguous. One miss disables long-gap re-ID for the
+    rest of the session.
 
-    The premise of the ratio test fails exactly when the two contenders are
-    indistinguishable *from each other*, which is measurable directly. Defaults
-    to the merge gate (0.48): the same decision — "are these two records one
-    person?" — under the same irreversibility, so it gets the same threshold
-    rather than a new tunable pulled from nowhere."""
+    When set, a track whose probe missed the gate by less than this margin is not
+    stored as a rival record of the identity it nearly matched, so the pair that
+    deadlocks the test never forms.
+
+    **OFF by default because it is net-harmful with strangers present.** Measured
+    over 2000 real leave/return cascades on WILDTRACK crops with the shipped
+    OSNet, gallery = owner + 1 stranger: own identity recovered 41.1% -> 43.0%,
+    but identity theft 6.2% -> 8.8%. It buys 1.9 points of recall for 2.6 points
+    of theft, which is the wrong direction for this module — see
+    :attr:`appearance_distance`. The cause is instructive: the suppressed
+    duplicate was acting as a *protective competitor*, and removing it lets a
+    stranger win a probe that the ratio test had been correctly refusing.
+
+    **Safe, and worth enabling, when the gallery holds one person's records
+    only** — the cardboard/acceptance scenario, one occupant in a room. There the
+    measured harm cannot occur: suppression never *assigns* an identity, so with
+    no stranger on file the only thing a probe can recover is the occupant, and
+    the deadlock is pure recall loss. Two mechanisms that instead judged identity
+    directly were tried first and were worse in every regime: merging two entries
+    by their mutual distance fuses two genuinely different people 40.5% of the
+    times it fires, and trusting a near-miss to say *which* identity a later
+    ambiguous probe belongs to points at the wrong person 45% of the time even in
+    a two-entry gallery. See status.txt, session 3g."""
     min_hits: int = 10
     """Only identities with this much accumulated evidence are worth storing;
     below it, a demotion would be preserving a false positive."""
@@ -203,10 +221,10 @@ class DormantConfig:
                 f"ratio_test must be in (0, 1] — a value above 1 would accept a match "
                 f"that is worse than its runner-up; got {self.ratio_test}"
             )
-        if not 0.0 <= self.duplicate_distance <= 2.0:
+        if not 0.0 <= self.near_miss_margin <= 1.0:
             raise ValueError(
-                f"duplicate_distance must be in [0, 2] (0 disables the check), "
-                f"got {self.duplicate_distance}"
+                f"near_miss_margin must be in [0, 1] (0 disables provenance "
+                f"linking), got {self.near_miss_margin}"
             )
         if self.min_hits < 1:
             raise ValueError(f"min_hits must be >= 1, got {self.min_hits}")
@@ -222,10 +240,17 @@ class DormantGallery:
         self.n_resurrected = 0
         self.n_expired = 0
         self.n_rejected_ambiguous = 0
-        self.n_collapsed = 0
+        self.n_rejected_assignment = 0
+        """Counted separately from ambiguity: the one-to-one solve vetoing a pair
+        and the ratio test refusing to choose are different failures, and a test
+        asserting on a shared counter cannot tell which one fired."""
+        self.n_suppressed_duplicates = 0
         self.attempts: deque[MatchAttempt] = deque(maxlen=512)
         """Every probe this gallery has seen, accepted or not. Bounded, so a long
         session keeps the recent history rather than growing without limit."""
+        self.last_attempts: list[MatchAttempt] = []
+        """Just the probes from the most recent :meth:`match` call, in query
+        order, so the caller can act on rejections as well as acceptances."""
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -248,6 +273,7 @@ class DormantGallery:
         hits: int,
         cameras_seen: tuple[str, ...] = (),
         last_world_xy: npt.ArrayLike | None = None,
+        same_as: int | None = None,
     ) -> bool:
         """Demote a retiring identity into the gallery. Returns True if stored."""
         if not self.config.enabled:
@@ -262,6 +288,22 @@ class DormantGallery:
             return False
         data = np.atleast_2d(np.asarray(vectors, dtype=np.float64))
         if data.size == 0:
+            return False
+
+        # Do not store a rival record of someone already in the gallery. Two
+        # entries for one person is what deadlocks the ratio test permanently;
+        # forgetting this one costs a fresh ID next visit and nothing else.
+        defer_to = self.would_duplicate(global_id, same_as)
+        if defer_to is not None:
+            self.n_suppressed_duplicates += 1
+            logger.info(
+                "frame %d: NOT storing global id %d — it probed and missed id %d by "
+                "a hair, so it is most likely the same person, and a second record "
+                "would deadlock the ratio test for every future return",
+                frame,
+                global_id,
+                defer_to,
+            )
             return False
 
         if len(self._entries) >= self.config.max_entries and global_id not in self._entries:
@@ -312,121 +354,19 @@ class DormantGallery:
             )
         return stale
 
-    def entry_distance(self, a: int, b: int) -> float:
-        """Symmetric top-k mean distance between two stored identities.
+    def would_duplicate(self, global_id: int, same_as: int | None) -> int | None:
+        """The stored identity ``global_id`` would become a rival record of.
 
-        Symmetric because the two entries hold different numbers of vectors
-        spanning different viewpoints, so ``a -> b`` and ``b -> a`` are not the
-        same number and neither alone is the honest one.
+        Returns the identity to defer to, or None if this one should be stored
+        normally. Deferring requires the older record to still be *present*: if
+        it expired, was evicted, or was already resurrected, suppressing this
+        identity would forget the person for no benefit at all.
         """
-        first, second = self._entries[a], self._entries[b]
-        if first.embeddings.size == 0 or second.embeddings.size == 0:
-            return 1.0
-        forward = float(first.distance(second.embeddings, self.config.top_k).mean())
-        backward = float(second.distance(first.embeddings, self.config.top_k).mean())
-        return 0.5 * (forward + backward)
-
-    def _collapse(self, keep: int, absorb: int, reason: str) -> None:
-        """Fold one dormant identity into another. Irreversible."""
-        kept, gone = self._entries[keep], self._entries[absorb]
-        merged = np.vstack([kept.embeddings, gone.embeddings])
-        self._entries[keep] = DormantEntry(
-            global_id=keep,
-            embeddings=select_representative(merged, self.config.embeddings_per_id),
-            # The TTL should run from the most recent sighting of the person, not
-            # from whichever copy happens to survive.
-            retired_frame=max(kept.retired_frame, gone.retired_frame),
-            # Both records are the same person's real evidence, so the support
-            # adds. This also keeps the merged identity senior to anything that
-            # might later contest it.
-            hits=kept.hits + gone.hits,
-            cameras_seen=tuple(sorted(set(kept.cameras_seen) | set(gone.cameras_seen))),
-            last_world_xy=(
-                gone.last_world_xy
-                if gone.retired_frame >= kept.retired_frame
-                else kept.last_world_xy
-            ),
-        )
-        del self._entries[absorb]
-        self.n_collapsed += 1
-        logger.info(
-            "dormant ids %d and %d collapsed into %d (%s): they are the same "
-            "person stored twice, %d + %d hits",
-            keep,
-            absorb,
-            keep,
-            reason,
-            kept.hits,
-            gone.hits,
-        )
-
-    def _collapse_contested_duplicates(self, cost: FloatArray, ids: list[int]) -> bool:
-        """Collapse contenders that are indistinguishable *from each other*.
-
-        The ratio test's premise is "two different identities fit comparably
-        well, so the evidence cannot pick one". When the two contenders are
-        themselves within the duplicate distance, that premise is false: there is
-        no identity at risk, because there is only one identity. Resolving it
-        here is what stops a single missed resurrection from deadlocking the
-        gallery forever.
-
-        Returns True if the gallery changed and the costs must be recomputed.
-        """
-        if self.config.duplicate_distance <= 0.0 or cost.shape[1] < 2:
-            return False
-
-        changed = False
-        for row in range(cost.shape[0]):
-            order = np.argsort(cost[row])
-            best_col, second_col = int(order[0]), int(order[1])
-            best, second = float(cost[row, best_col]), float(cost[row, second_col])
-            if not np.isfinite(second) or best <= self.config.ratio_test * second:
-                continue  # not contested — the ratio test is satisfied
-            # Only collapse when the query is evidence about *these* identities.
-            # Two entries may well be one person, but a query that matches
-            # neither has no standing to say so.
-            #
-            # The bar for *standing* is deliberately the duplicate distance, not
-            # the resurrection gate. Collapsing two records is gallery hygiene,
-            # not an identity claim about the query: it answers "are these two
-            # entries one person?", which is the same question the duplicate
-            # distance already governs. Requiring the stricter resurrection gate
-            # here would have made this fix a no-op on the run that motivated it
-            # — that query sat at 0.45, just *outside* the 0.42 gate, which is
-            # precisely why the person was not recognised in the first place.
-            # The gate still decides whether anything is resurrected; it just no
-            # longer decides whether the gallery may be de-duplicated.
-            if best > max(self.config.appearance_distance, self.config.duplicate_distance):
-                continue
-            first_id, second_id = ids[best_col], ids[second_col]
-            if first_id not in self._entries or second_id not in self._entries:
-                continue  # already collapsed by an earlier row this pass
-            separation = self.entry_distance(first_id, second_id)
-            if separation > self.config.duplicate_distance:
-                continue  # genuinely two people who look alike — leave it ambiguous
-            keep, absorb = self._seniority(first_id, second_id)
-            self._collapse(
-                keep,
-                absorb,
-                f"contested by one query at {best:.3f}/{second:.3f}, "
-                f"mutual distance {separation:.3f} <= {self.config.duplicate_distance}",
-            )
-            changed = True
-        return changed
-
-    def _seniority(self, a: int, b: int) -> tuple[int, int]:
-        """Order two identities as (keep, absorb).
-
-        More accumulated evidence wins, then the lower — that is, older — global
-        ID. Keeping the senior one is what makes a recovered identity the
-        *original* one rather than whichever duplicate happened to be minted
-        last; a fix that resurrects the newer copy would recover the ID switch
-        without undoing it.
-        """
-        first, second = self._entries[a], self._entries[b]
-        if (first.hits, -a) >= (second.hits, -b):
-            return a, b
-        return b, a
+        if same_as is None or self.config.near_miss_margin <= 0.0:
+            return None
+        if same_as == global_id or same_as not in self._entries:
+            return None
+        return same_as
 
     def match(
         self, queries: npt.ArrayLike, contexts: list[str] | None = None
@@ -452,12 +392,6 @@ class DormantGallery:
 
         ids = self.ids
         cost = self._cost(query, ids)
-
-        # Break any same-person deadlock before judging ambiguity, then re-cost
-        # against the collapsed gallery.
-        if self._collapse_contested_duplicates(cost, ids):
-            ids = self.ids
-            cost = self._cost(query, ids)
 
         # Ratio test, computed on the UNGATED row and applied before gating.
         # Ranking post-gate candidates is worse than useless: the true owner
@@ -487,7 +421,7 @@ class DormantGallery:
             row_best = float(cost[row].min())
             if float(cost[row, col]) > row_best / max(self.config.ratio_test, 1e-9):
                 outcomes[row] = REJECTED_ASSIGNMENT
-                self.n_rejected_ambiguous += 1
+                self.n_rejected_assignment += 1
                 continue
             outcomes[row] = ACCEPTED
             accepted.append((row, ids[col], float(cost[row, col])))
@@ -518,6 +452,7 @@ class DormantGallery:
         contexts: list[str] | None,
     ) -> None:
         """Log and retain every probe, with the distances that decided it."""
+        self.last_attempts = []
         for row in range(cost.shape[0]):
             order = np.argsort(cost[row])
             attempt = MatchAttempt(
@@ -529,6 +464,7 @@ class DormantGallery:
                 ),
             )
             self.attempts.append(attempt)
+            self.last_attempts.append(attempt)
             logger.info(
                 "dormant probe | gate %.2f ratio %.2f | %s",
                 self.config.appearance_distance,
@@ -555,7 +491,7 @@ class DormantGallery:
             f"dormant probes: {len(self.attempts)} "
             f"(gate {self.config.appearance_distance:.2f}, "
             f"ratio {self.config.ratio_test:.2f}, "
-            f"duplicate {self.config.duplicate_distance:.2f})"
+            f"near-miss margin {self.config.near_miss_margin:.2f})"
         ]
         for outcome in sorted(by_outcome):
             values = np.asarray(by_outcome[outcome], dtype=np.float64)

@@ -74,6 +74,17 @@ def run(
             "revive_appearance_distance (0.48)."
         ),
     ),
+    single_occupant: bool = typer.Option(
+        False,
+        "--single-occupant",
+        help=(
+            "Enable duplicate suppression in the dormant gallery. Valid ONLY when "
+            "you are the only person who will be in frame: it stops one missed "
+            "re-identification from deadlocking every later return, but with "
+            "strangers on file it was measured to cost more identity theft than "
+            "the recall it buys. Use it for the sit/leave/return acceptance run."
+        ),
+    ),
     clip_seconds: float = typer.Option(8.0, help="Length of the save-clip buffer."),
     out_dir: Path = typer.Option(Path("reports"), help="Where 's' saves clips."),
     max_frames: int = typer.Option(0, help="Stop after N frames (0 = until 'q')."),
@@ -119,11 +130,21 @@ def run(
         ),
     )
     fusion_config = None
-    if dormant_gate is not None:
+    if dormant_gate is not None or single_occupant:
+        gate = dormant_gate if dormant_gate is not None else DormantConfig().appearance_distance
         fusion_config = FusionConfig(
-            dormant=DormantConfig(appearance_distance=dormant_gate)
+            dormant=DormantConfig(
+                appearance_distance=gate,
+                near_miss_margin=0.10 if single_occupant else 0.0,
+            )
         )
-        typer.echo(f"dormant appearance gate overridden: {dormant_gate:.2f}")
+        if dormant_gate is not None:
+            typer.echo(f"dormant appearance gate overridden: {dormant_gate:.2f}")
+        if single_occupant:
+            typer.echo(
+                "single-occupant mode: a near-missed return will not be stored as a "
+                "rival record. Only valid if nobody else appears in frame."
+            )
 
     session = LiveSession(
         backend=backend,
@@ -223,10 +244,10 @@ def run(
     # exactly like nobody having returned. Print what the gate actually saw.
     for line in session.manager.dormant.probe_report():
         typer.echo(line)
-    if session.manager.dormant.n_collapsed:
+    if session.manager.dormant.n_suppressed_duplicates:
         typer.echo(
-            f"{session.manager.dormant.n_collapsed} duplicate dormant "
-            f"identity/identities collapsed (same person stored twice)"
+            f"{session.manager.dormant.n_suppressed_duplicates} identity/identities "
+            f"not stored as duplicates of someone already in the gallery"
         )
 
 

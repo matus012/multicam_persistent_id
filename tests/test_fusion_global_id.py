@@ -243,7 +243,7 @@ def _split_pair(dim: int, separation: float) -> tuple[FloatArray, FloatArray, Fl
     return first, second, midpoint / np.linalg.norm(midpoint)
 
 
-def _leave_return_cascade(duplicate_distance: float) -> tuple[GlobalIDManager, list[int]]:
+def _leave_return_cascade(near_miss_margin: float) -> tuple[GlobalIDManager, list[int]]:
     """Sit / leave / return-and-be-missed / leave / return again.
 
     The appearance on the second visit sits at 0.45 from the stored vector —
@@ -253,7 +253,7 @@ def _leave_return_cascade(duplicate_distance: float) -> tuple[GlobalIDManager, l
     that must still recover the original identity.
     """
     cams = bedroom_rig()
-    config = FusionConfig(dormant=DormantConfig(duplicate_distance=duplicate_distance))
+    config = FusionConfig(dormant=DormantConfig(near_miss_margin=near_miss_margin))
     mgr = GlobalIDManager(_rig(), config)
     first, second, midpoint = _split_pair(16, separation=0.45)
 
@@ -274,21 +274,73 @@ def _leave_return_cascade(duplicate_distance: float) -> tuple[GlobalIDManager, l
     return mgr, live
 
 
-def test_a_missed_resurrection_deadlocks_the_gallery_without_the_duplicate_check() -> None:
+def test_a_missed_resurrection_deadlocks_the_gallery_without_provenance() -> None:
     """The bug, reproduced: proves the test below is testing something real."""
-    mgr, live = _leave_return_cascade(duplicate_distance=0.0)
+    mgr, live = _leave_return_cascade(near_miss_margin=0.0)
 
     assert mgr.dormant.n_resurrected == 0, "the deadlock means nothing is ever recovered"
     assert live and 1 not in live, f"the original identity stays lost, got {live}"
     assert mgr.dormant.n_rejected_ambiguous >= 1, (
         "and it is the ratio test doing it — two stored copies of the same person"
     )
+    assert len(mgr.dormant) == 2, "both rival records are on file, which is the cause"
 
 
 def test_the_original_identity_survives_a_missed_resurrection() -> None:
     """The fix: the third visit recovers ID 1, not a fourth new number."""
-    mgr, live = _leave_return_cascade(duplicate_distance=0.48)
+    mgr, live = _leave_return_cascade(near_miss_margin=0.10)
 
-    assert mgr.dormant.n_collapsed == 1, "the two stored copies must be recognised as one"
+    assert mgr.dormant.n_suppressed_duplicates == 1, (
+        "visit 2's identity must never have been stored as a rival record"
+    )
     assert mgr.dormant.n_resurrected == 1
     assert live == [1], f"the returning person must carry the original id, got {live}"
+
+
+def test_recovery_destroys_no_stored_identity() -> None:
+    """Nothing existing may be merged, renamed or deleted to make this work.
+
+    Two earlier attempts at this failed exactly here: one merged the two entries
+    (which on real crops fuses two different people 40.5% of the time it fires),
+    the other let a near-miss *assign* an identity (wrong person 45% of the time
+    in a two-entry gallery). Suppression only ever withholds a new record, so the
+    worst case is forgetting someone, never renaming them.
+    """
+    mgr, _live = _leave_return_cascade(near_miss_margin=0.10)
+    assert mgr.dormant.n_admitted == 1, "exactly one record was ever stored"
+    assert mgr.dormant.n_resurrected == 1, "and it was handed back to its owner"
+
+
+def test_an_adopted_track_stops_shopping_the_gallery() -> None:
+    """A track that recovered an identity must not hop to another record of it.
+
+    An adopted track stays TENTATIVE until it earns confirmation, so without a
+    guard it probes again every frame of that window. If a second record of the
+    same person is on file for any reason — suppression disabled, or the origin
+    expired between visits — it trades the identity it just correctly recovered
+    for the duplicate, which recovers the ID switch without undoing it.
+
+    ``n_init=5`` is deliberate: at the shipped ``n_init=3`` an adopted track
+    confirms on the next measured frame, so the window closes by arithmetic
+    rather than by the guard, and the test would pass with the guard removed.
+    """
+    cams = bedroom_rig()
+    mgr = GlobalIDManager(_rig(), FusionConfig(n_init=5))
+    person = _unit_embedding(16, 0)
+
+    mgr.dormant.admit(41, person[None, :], frame=0, hits=500)
+    frame = _visit(mgr, cams, person, start=1, frames=2)
+    adopted = [t.global_id for t in mgr.tracks]
+    assert adopted == [41], f"the track should have adopted id 41, got {adopted}"
+    assert mgr.dormant.n_resurrected == 1
+
+    # A rival record of the same person appears while the track is still tentative.
+    mgr.dormant.admit(77, person[None, :], frame=frame, hits=500)
+    assert any(t.state is TrackState.TENTATIVE for t in mgr.tracks), (
+        "test setup: the adopted track must still be tentative for this to bite"
+    )
+    _visit(mgr, cams, person, start=frame, frames=2)
+
+    assert [t.global_id for t in mgr.tracks] == [41], "the adopted identity must stick"
+    assert mgr.dormant.n_resurrected == 1, "and no second identity may be consumed"
+    assert 77 in mgr.dormant
