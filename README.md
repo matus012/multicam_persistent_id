@@ -1,28 +1,105 @@
 # mcreid — multi-camera persistent-ID tracking with a live BEV map
 
-Multiple overlapping cameras, one global ID per person. Someone entering any
-view gets an identity and keeps it across camera handoffs, through occlusions,
-and across absences of minutes.
+A few overlapping cameras, one global ID per person. Someone entering any view
+gets an identity and keeps it across camera handoffs, through occlusions — even
+total occlusion from every camera at once — and across absences of minutes.
+
+The target regime is **one to a handful of people in a room**, not crowds. That
+is where a purely geometric, zero-training system does well, and the project is
+scoped to it deliberately. Where it stops working is measured and written down
+rather than left out: see [Stress test](#stress-test--where-this-breaks-and-why).
 
 **Zero training by us.** Every component is off-the-shelf and pretrained by
 someone else — YOLO11x on COCO for detection, OSNet on MSMT17 for appearance —
-and none of them has seen the evaluation data. The fusion is geometric.
+and none of them has seen any evaluation data used here. The fusion is geometric.
 
-![demo](docs/assets/wildtrack_demo.gif)
+![cardboard demo](docs/assets/cardboard_demo.gif)
 
-*Three WILDTRACK cameras and the bird's-eye map, real footage. Watch one number
-and one colour follow a person from camera to camera — that agreement is the
-entire claim. `[3cam]` on the map marks a track fused across three views;
-`occl` marks one being coasted through an occlusion.*
+*The hero scenario: one person, four cameras, progressively occluded — one
+camera, then two, then three, then **all four** for 2.5 s. The BEV dot switches
+to a hollow coasting ring, holds its ID through the blackout, and re-locks on the
+same ID when the person reappears.*
+
+> **This GIF is the synthetic reproduction of the scenario, not real footage.**
+> The real four-camera capture is pending — the recording protocol is written and
+> ready in [capture_guide.md](capture_guide.md), and the synthetic scene
+> reproduces its exact geometry and occlusion timeline so only the detector
+> front-end is new when the clips arrive.
 
 ---
 
 ## Results
 
-### Real footage — WILDTRACK
+### Primary — persistent ID under occlusion
 
-7 static cameras over a public square, 400 annotated frames at 2 fps, 1920×1080.
-Nothing here is fine-tuned. Full write-up: [docs/wildtrack_results.md](docs/wildtrack_results.md).
+Synthetic, five seeds. The scene is not a single agent: it contains the hero, a
+second person present throughout, and a persistent false positive, because with
+one agent alone "zero ID switches" is achievable by any tracker that never mints
+a second identity — a stateless 25-line stub passed an earlier version of this
+gate, so the scene composition is now asserted by a test.
+
+| scenario | result |
+|---|---|
+| cardboard, 2.5 s total occlusion from all four cameras | hero holds its ID on **4/5 seeds**; ≤1 switch on any seed |
+| BEV dot alive through the blackout | **75/75 frames, all seeds** |
+| long-gap re-ID (75 s absence, distractor present throughout) | **0 switches**, identity recovered on all seeds |
+| adversarial long-gap (a stranger present only during the absence) | stranger **never** inherits the dormant identity |
+
+The appearance model in this generator is **fitted to the operating point
+measured on real WILDTRACK crops**, not to published ReID numbers. Published
+figures describe a model trained on the target domain and are ~8× easier than the
+zero-shot reality this stack ships; gates calibrated against them passed while
+the real system under-merged badly. Recalibrating cost the cardboard gate its
+former perfect score, which is the point — see [Limitations](#limitations).
+
+### Calibration
+
+| quantity | result |
+|---|---|
+| focal length error (synthetic capture) | < 0.4 % |
+| ground homography residual | 0.1 cm |
+| image → world floor position error | 4–16 mm mean |
+| WILDTRACK converter cross-check vs dataset GT | 3–15 px median per camera |
+
+---
+
+## Stress test — where this breaks, and why
+
+WILDTRACK is deliberately outside the target regime: 7 cameras over a public
+square, dozens of people at once, wide baselines, 400 annotated frames at 2 fps.
+It is run here as a **failure analysis**, not as a benchmark claim. Full
+write-up: [docs/wildtrack_results.md](docs/wildtrack_results.md).
+
+![WILDTRACK stress test](docs/assets/wildtrack_demo.gif)
+
+*Three of the seven cameras and the BEV, real footage. One number and one colour
+still follow a person across views — `[3cam]` marks a track fused across three
+views — but the map is visibly denser than the number of real people.*
+
+### The cause: a bounding box's bottom edge is not a foot
+
+This is the finding, and it is upstream of everything else. The same person's
+ground position, computed independently from two cameras:
+
+| | ground-truth boxes | **detector boxes** |
+|---|---|---|
+| mean disagreement | 0.12 m | **1.60 m** |
+| p90 | 0.21 m | **4.50 m** |
+| beyond the 1.0 m clustering radius | 0 % | **31 %** |
+
+The projection maths is sound — given clean boxes, the cameras agree to 12 cm.
+But the bottom edge of a detection box is the ground-contact point only when the
+feet are visible, and in a crowd they are routinely occluded, so the box
+truncates at whoever is standing in front. A third of the same person's
+detections therefore land more than a metre apart, and **no clustering radius can
+group them**. The system consequently emits ~2.5× more ground-plane detections
+than there are people.
+
+Everything downstream inherits this. Appearance thresholds, association cost
+weights and a geometry-only merge were each swept and measured; none moved the
+result, because the broken part is the input geometry, not the matcher.
+
+### What that costs, in numbers
 
 <!-- RESULTS_TABLE_START — regenerate with scripts/make_results_table.py -->
 | configuration | MODA | MODP | precision | recall | ID switches | IDs reported |
@@ -35,80 +112,30 @@ Nothing here is fine-tuned. Full write-up: [docs/wildtrack_results.md](docs/wild
 both. Runtime 7.7 FPS/camera, 1.10 FPS aggregate at 7×1080p on an RTX 4060
 Laptop (9.7 / 1.38 for the lighter ImageNet trunk).
 
-**MODA is strongly negative and that is the honest result.** MODA charges every
-false positive against the ground-truth count, and the system emits ~2.5× more
-ground-plane detections than there are people: 17910 false positives against
+MODA charges every false positive against the ground-truth count, so the
+duplicate detections above put it deeply negative: 17910 false positives against
 6606 true. Recall is fine (69 %); precision is not (27 %).
 
-**The embedder swap does not fix it.** OSNet is 3× better separated than the
-ImageNet trunk and it buys a 14 % reduction in ID switches (741 → 636) and fewer
-identities (1000 → 943) — real, but confined to identity metrics. MODA, MODP,
-precision and recall are unchanged to three decimals, because they are dominated
-by duplicate detections, which is a *geometry* problem.
+MVDet is trained *on WILDTRACK*; this is zero-shot, and the two are not
+comparable on equal terms. Its numbers are left blank rather than recalled
+approximately — a fabricated benchmark figure sitting next to real measurements
+is worse than a visible gap.
 
-MVDet is trained *on WILDTRACK*; this is zero-shot. Its numbers are left blank
-rather than recalled approximately — a fabricated benchmark figure next to real
-measurements is worse than a visible gap.
+### The embedder is not the bottleneck here
 
-### Why precision is bad — measured, not guessed
-
-The same person's position, as computed from two different cameras:
-
-| | ground-truth boxes | **detector boxes** |
-|---|---|---|
-| mean disagreement | 0.12 m | **1.60 m** |
-| p90 | 0.21 m | **4.50 m** |
-| beyond the 1.0 m clustering radius | 0 % | **31 %** |
-
-The projection maths is sound — with clean boxes, cameras agree to 12 cm. But a
-bounding box's bottom edge is only the ground-contact point when the feet are
-visible, and in a crowd they are routinely occluded, so the box is truncated at
-whoever is standing in front. A third of the same person's detections therefore
-land more than a metre apart and **no clustering radius can group them**.
-
-That is why neither appearance thresholds, nor cost weights, nor a
-geometry-only merge changed the outcome: the input geometry is the broken part.
-The fix is a better ground-contact estimate (e.g. inferring it from box height
-and known stature rather than the bottom edge), not a better embedder.
-
-### The appearance model is the whole story
-
-Cross-camera cosine distance, measured on real WILDTRACK crops with
-ground-truth identities:
+Cross-camera cosine distance, measured on real WILDTRACK crops with ground-truth
+identities:
 
 | embedder | same person, diff. camera | different person, diff. camera | separation |
 |---|---|---|---|
 | ImageNet ResNet-18 (not a ReID model) | 0.377 | 0.409 | **0.032** |
 | OSNet, MSMT17-trained | 0.525 | 0.623 | **0.098** |
 
-The v1 stack used the ImageNet trunk, whose distributions essentially overlap —
-no threshold separates them, and a `--geometry-only` ablation changed almost
-nothing. Swapping in a real ReID model is a 3× improvement in separation and the
-single biggest lever in the project.
-
-### Synthetic scenario suite
-
-The synthetic generator's appearance model is **fitted to the measured OSNet
-operating point above**, not to published ReID numbers. That distinction matters:
-published numbers describe a model trained on the target domain and are ~8×
-easier than the zero-shot reality this stack ships. Gates calibrated against the
-easy distribution passed while the real system under-merged badly.
-
-| scenario | result |
-|---|---|
-| cardboard (1 hero + distractor + persistent false positive, 2.5 s total occlusion) | hero holds its ID on 4/5 seeds; ≤1 switch on any seed |
-| BEV dot alive through the blackout | 75/75 frames, all seeds |
-| long-gap re-ID (75 s absence, distractor present throughout) | 0 switches, identity recovered on all seeds |
-| adversarial long-gap (stranger present only during the absence) | stranger never inherits the dormant ID |
-
-### Calibration
-
-| quantity | result |
-|---|---|
-| focal length error (synthetic capture) | < 0.4 % |
-| ground homography residual | 0.1 cm |
-| image → world floor position error | 4–16 mm mean |
-| WILDTRACK converter cross-check vs dataset GT | 3–15 px median per camera |
+Swapping the ImageNet trunk for a real ReID model is a 3× improvement in
+separation and it does help identity: ID switches 741 → 636, reported identities
+1000 → 943. But MODA, MODP, precision and recall are unchanged to three decimals,
+because those are dominated by duplicate detections rather than identity
+confusion. A better embedder cannot fix a bad foot point.
 
 ---
 
@@ -181,7 +208,7 @@ uv run mcreid-wildtrack run --root data/wildtrack_full --n-frames 400
 ```
 
 ```bash
-uv run mcreid-wildtrack-demo render --root data/wildtrack_full --n-frames 120
+uv run mcreid-wildtrack-demo --root data/wildtrack_full --n-frames 120
 ```
 
 ### Your own cameras
@@ -200,28 +227,61 @@ refuses to pass a calibration that does not reproduce it. See
 
 ---
 
-## Honest limitations
+## Limitations
 
+- **The headline scenario is not perfect, and the numbers are synthetic.** On the
+  cardboard gate the hero takes **1 ID switch on 3 of 5 seeds** and survives the
+  2.5 s total occlusion on 4 of 5. An earlier version of this README reported
+  zero switches on every seed; that result was real but measured a generator
+  calibrated to *published* ReID numbers, i.e. a model trained on the target
+  domain. Refitting the generator to the zero-shot operating point actually
+  measured on WILDTRACK cost the perfect score. The old number is not
+  recoverable by tuning — appearance weight, cost ceiling and every gate
+  threshold were swept with no effect. **Real four-camera footage has not been
+  captured yet**, so no real-world number exists for this scenario at all.
 - **Crowds break precision.** On WILDTRACK the tracker emits ~2.5× more
   ground-plane detections than there are people, giving a strongly negative
-  MODA. The cause is measured above: occlusion-truncated detection boxes put the
-  same person more than a metre apart between cameras a third of the time. This
-  is the single biggest open problem in the project.
-- **Runtime is not real-time at 7×1080p.** Measured on an RTX 4060 Laptop; the
-  numbers are in the results table and no target is claimed for that load.
-  Detection dominates — per-view tracking plus fusion costs 1–2 ms/frame.
+  MODA. The cause is measured, not guessed: occlusion-truncated detection boxes
+  put the same person more than a metre apart between cameras a third of the
+  time (0.12 m with clean boxes, 1.60 m mean with detector boxes). This is the
+  single biggest open problem in the project, and it is a *geometry* problem —
+  a better appearance model does not touch it.
+- **Runtime is not real-time at 7×1080p.** Measured on an RTX 4060 Laptop: 7.7
+  FPS per camera, 1.10 FPS aggregate across seven 1080p streams. No target is
+  claimed for that load. Detection dominates — per-view tracking plus fusion
+  costs 1–2 ms/frame, so essentially the whole budget is the detector.
 - **"Zero training" means zero training *by us*.** The detector and the ReID
-  model are both pretrained on public data. Neither has seen WILDTRACK, so the
-  evaluation is zero-shot, but this is not a from-scratch system and is not
-  claimed to be.
+  model are both pretrained on public data. Neither has seen the evaluation
+  data, so the evaluation is zero-shot, but this is not a from-scratch system
+  and is not claimed to be.
 - **Coasting is short-lived accuracy.** Through a 2.5 s total occlusion the BEV
   dot survives the whole time and the identity is retained, but the
   constant-velocity prediction only stays within a metre of truth for about half
   of it. The rest of the identity is recovered by the ReID re-lock, not by the
-  motion model.
+  motion model. Say it that way.
 - **The synthetic suite is a proxy, not proof.** It is now fitted to a measured
   operating point, but it still models appearance as a vector plus noise. It
-  caught none of the failures that real footage exposed.
+  caught none of the failures that real footage exposed — including the
+  foot-point problem, which it cannot represent at all.
+
+## v2 directions
+
+In the order they would pay off:
+
+1. **Stature-based foot-point estimator.** Infer the ground-contact point from
+   box *height* and an assumed stature under the known camera geometry, instead
+   of trusting the bottom edge. This targets the measured root cause directly and
+   is the highest-value change available; everything else is downstream of it.
+2. **Trained multi-view fusion (MVDet-style).** Project per-view features to a
+   shared ground-plane feature map and learn the occupancy decision, rather than
+   projecting a single point per detection and clustering by hand. This replaces
+   the brittle foot-point-plus-radius pipeline outright, at the cost of the
+   zero-training property.
+3. **Synthetic multi-view data engine.** Needed to train either of the above
+   without hand-labelling: exact ground-truth positions, controllable occlusion,
+   and calibration that is correct by construction. Design note already written
+   in [`scripts/README_v2_synthetic_engine.md`](scripts/README_v2_synthetic_engine.md);
+   the case for it is now measured rather than assumed.
 
 ---
 
