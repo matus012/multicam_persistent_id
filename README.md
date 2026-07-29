@@ -211,7 +211,39 @@ uv run mcreid-wildtrack run --root data/wildtrack_full --n-frames 400
 uv run mcreid-wildtrack-demo --root data/wildtrack_full --n-frames 120
 ```
 
-### Your own cameras
+### Live webcam — single camera, no calibration needed
+
+```bash
+uv run mcreid-live --device 0
+```
+
+Runs the full per-view stack on a webcam: detection, appearance, tracking,
+occlusion coasting, and dormant-gallery re-identification for someone who leaves
+the frame and comes back. The overlay shows each box with its global ID, colour,
+track state, and how long that identity has been held; the banner reports FPS,
+live track count, and **"ID N reacquired after Xs gap"** when the long-gap
+gallery recovers someone. Hotkeys: `q` quit, `s` save the last few seconds to
+`reports/`.
+
+Calibration is optional — with one camera there is no cross-view fusion, so
+identity does not depend on knowing the floor plane. Pass a 4-point YAML to get
+the metric BEV panel as well:
+
+```bash
+uv run mcreid-live --device 0 --homography calib/floor_4point.yaml
+```
+
+```yaml
+image_points: [[420, 980], [1500, 980], [1310, 640], [610, 640]]
+world_points: [[0.0, 0.0], [3.0, 0.0], [3.0, 4.0], [0.0, 4.0]]
+```
+
+Defaults to `yolo11s` at `--imgsz 960`, which runs comfortably faster than
+real-time at 720p on an RTX 4060 Laptop (measured: 78 FPS processing throughput
+on an idle scene, 19 FPS on a dense crowd frame). Use `--weights
+weights/yolo11x.pt` for accuracy over speed.
+
+### Your own cameras — multi-camera rig
 
 ```bash
 uv run mcreid-calibrate rig --capture-dir footage/calib --square-size-m 0.025
@@ -295,7 +327,8 @@ src/mcreid/
   fusion/   ground Kalman, appearance gallery, association, global IDs, dormant gallery
   eval/     identity metrics, WILDTRACK protocol (MODA/MODP)
   viz/      BEV canvas, overlays, demo composition
-  cli/      calibrate · demo · sync · eval · wildtrack · wildtrack-demo
+  live.py   single-camera live session (testable without a camera or GPU)
+  cli/      calibrate · demo · live · sync · eval · wildtrack · wildtrack-demo
 ```
 
 - [context.md](context.md) — scope, locked architecture, design rationale

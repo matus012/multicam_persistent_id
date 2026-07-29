@@ -46,6 +46,7 @@ dev = [
 [project.scripts]
 mcreid-calibrate = "mcreid.cli.calibrate:app"
 mcreid-demo = "mcreid.cli.demo:app"
+mcreid-live = "mcreid.cli.live:app"
 mcreid-sync = "mcreid.cli.sync:app"
 mcreid-eval = "mcreid.cli.eval_wildtrack:app"
 mcreid-wildtrack = "mcreid.cli.wildtrack_run:app"
