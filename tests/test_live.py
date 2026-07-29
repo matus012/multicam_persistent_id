@@ -169,6 +169,53 @@ def test_track_coasts_through_a_short_disappearance() -> None:
     )
 
 
+def test_wall_fps_is_the_callers_rate_not_the_processing_rate() -> None:
+    """The two rates are different numbers and must not be conflated.
+
+    A saved clip is written at one frame per loop iteration, so quoting the
+    processing throughput as the session rate (and as the clip's frame rate)
+    plays the video back time-compressed.
+    """
+    session = _session(_ScriptedBackend())
+    for i in range(20):
+        session.process(_frame(), now=i / 15, dt=1 / 15)
+
+    assert session.wall_fps == pytest.approx(15.0, rel=1e-6)
+    assert session.fps > session.wall_fps, (
+        "synthetic frames process far faster than the 15 FPS clock they claim; "
+        "if these two are equal the wall rate is not being measured"
+    )
+
+
+def test_reported_ids_excludes_tentative_births() -> None:
+    """One flicker of a false detection must not read as a second identity."""
+
+    class _FlickeringBackend(_ScriptedBackend):
+        def step(self, image, frame: int) -> list[ViewObservation]:
+            observations = super().step(image, frame)
+            if frame == 10:  # a single-frame ghost, far from the person
+                observations.append(
+                    ViewObservation(
+                        camera_id=LIVE_CAMERA_ID,
+                        frame=frame,
+                        local_track_id=2,
+                        bbox_xyxy=np.array([20.0, 100.0, 80.0, 160.0]),
+                        embedding=_unit(99),
+                        score=0.6,
+                    )
+                )
+            return observations
+
+    session = _session(_FlickeringBackend())
+    for i in range(30):
+        session.process(_frame(), now=i / 30, dt=1 / 30)
+
+    assert session.manager.n_ids_issued >= 2, "the ghost should mint a tentative track"
+    assert session.reported_ids == [1], (
+        f"only the person was ever confirmed, got {session.reported_ids}"
+    )
+
+
 def test_clip_buffer_is_bounded_and_saves(tmp_path) -> None:
     session = _session(_ScriptedBackend())
     session.set_clip_capacity(10.0)  # 1.0 s * 10 fps

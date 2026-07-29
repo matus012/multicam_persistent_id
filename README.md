@@ -220,10 +220,11 @@ uv run mcreid-live --device 0
 Runs the full per-view stack on a webcam: detection, appearance, tracking,
 occlusion coasting, and dormant-gallery re-identification for someone who leaves
 the frame and comes back. The overlay shows each box with its global ID, colour,
-track state, and how long that identity has been held; the banner reports FPS,
-live track count, and **"ID N reacquired after Xs gap"** when the long-gap
-gallery recovers someone. Hotkeys: `q` quit, `s` save the last few seconds to
-`reports/`.
+track state, and how long that identity has been held; the banner reports the
+end-to-end frame rate, live track count, and **"ID N reacquired after Xs gap"**
+when the long-gap gallery recovers someone. Hotkeys: `q` quit, `s` save the last
+few seconds to `reports/` (written at the measured capture rate, so it plays
+back at life speed).
 
 Calibration is optional — with one camera there is no cross-view fusion, so
 identity does not depend on knowing the floor plane. Pass a 4-point YAML to get
@@ -238,10 +239,19 @@ image_points: [[420, 980], [1500, 980], [1310, 640], [610, 640]]
 world_points: [[0.0, 0.0], [3.0, 0.0], [3.0, 4.0], [0.0, 4.0]]
 ```
 
-Defaults to `yolo11s` at `--imgsz 960`, which runs comfortably faster than
-real-time at 720p on an RTX 4060 Laptop (measured: 78 FPS processing throughput
-on an idle scene, 19 FPS on a dense crowd frame). Use `--weights
-weights/yolo11x.pt` for accuracy over speed.
+Defaults to `yolo11s` at `--imgsz 960`. Measured on an RTX 4060 Laptop at
+1280x720 with one person in frame: **19–21 FPS end-to-end** — capture, detect,
+embed, track, render, display — against a tracking-only throughput of 32–34 FPS.
+Both numbers are printed, and they are not interchangeable: the gap is the
+webcam read and the `imshow`, so the tracking stack has roughly a third more
+headroom than the session rate suggests. Use `--weights weights/yolo11x.pt` for
+accuracy over speed.
+
+The end-of-run summary reports **identities confirmed and shown** alongside the
+raw mint counter. Only the first is a count of people: a single-frame false
+detection mints a tentative track that the lifecycle deletes three frames later,
+so the mint counter climbs on a live camera even when identity is perfectly
+stable.
 
 ### Your own cameras — multi-camera rig
 

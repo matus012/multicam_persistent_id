@@ -187,6 +187,8 @@ class LiveSession:
         self.timeline = IdentityTimeline()
         self.frame_index = -1
         self._fps = deque[float](maxlen=30)
+        self._dt = deque[float](maxlen=30)
+        self.last_now = 0.0
         self._max_coasting_lines = 6
         self.clip: deque[Image] = deque(maxlen=1)
         self._bev: Any | None = None
@@ -207,13 +209,43 @@ class LiveSession:
 
     @property
     def fps(self) -> float:
+        """Tracking throughput: detection + fusion + render, per second.
+
+        This is *processing time alone*. It is the right number for "can the
+        stack keep up", and the wrong one for "how fast is the session running"
+        — see :attr:`wall_fps`.
+        """
         return float(np.mean(self._fps)) if self._fps else 0.0
+
+    @property
+    def wall_fps(self) -> float:
+        """End-to-end loop rate, capture and display included.
+
+        Measured from the caller's own clock, so it counts the webcam read and
+        the imshow that :attr:`fps` excludes — together roughly a third of the
+        loop at 720p. This is the honest session rate, and the rate a saved
+        clip must be written at if it is to play back at life speed.
+        """
+        return 1.0 / float(np.mean(self._dt)) if self._dt else 0.0
+
+    @property
+    def reported_ids(self) -> list[int]:
+        """Global IDs that ever reached CONFIRMED — the identities a viewer saw.
+
+        Not the same as ``manager.n_ids_issued``, which counts every birth
+        including tentative tracks that a one-frame spurious detection creates
+        and the lifecycle deletes three frames later. Quoting the minted count
+        as "people seen" overstates it by a large factor.
+        """
+        return sorted(self.timeline.first_seen)
 
     def process(self, frame: Image, now: float, dt: float) -> tuple[Image, dict[str, Any]]:
         """Track one frame. Returns the annotated frame and a state summary."""
         if dt <= 0.0:
             raise ValueError(f"dt must be positive, got {dt}")
         self.frame_index += 1
+        self.last_now = now
+        self._dt.append(dt)
         started = time.perf_counter()
 
         observations = self.backend.step(frame, self.frame_index)
@@ -234,7 +266,9 @@ class LiveSession:
             "coasting": sum(1 for s in snapshots if s.state is TrackState.COASTING),
             "dormant": len(self.manager.dormant),
             "resurrected": self.manager.dormant.n_resurrected,
+            "reported_ids": len(self.timeline.first_seen),
             "fps": self.fps,
+            "wall_fps": self.wall_fps,
         }
 
     def _render(
@@ -316,7 +350,7 @@ class LiveSession:
         if live:
             held_id = max(live, key=lambda s: self.timeline.held_seconds(s.global_id, now))
 
-        parts = [f"{self.fps:4.1f} FPS", f"tracks {len(snapshots)}"]
+        parts = [f"{self.wall_fps:4.1f} FPS", f"tracks {len(snapshots)}"]
         if held_id is not None:
             parts.append(f"ID {held_id.global_id} held {longest:.0f}s")
         if self.timeline.reacquired_gap:
@@ -350,7 +384,13 @@ class LiveSession:
         return np.hstack([canvas, np.asarray(panel, dtype=np.uint8)])
 
     def save_clip(self, out_dir: Path, fps: float) -> Path | None:
-        """Write the rolling buffer to an mp4. Returns None if nothing buffered."""
+        """Write the rolling buffer to an mp4. Returns None if nothing buffered.
+
+        ``fps`` must be the rate the frames were *captured* at
+        (:attr:`wall_fps`), not the processing throughput: the buffer holds one
+        entry per loop iteration, so writing it at the faster processing rate
+        makes the clip play back time-compressed.
+        """
         if not self.clip:
             return None
         out_dir.mkdir(parents=True, exist_ok=True)

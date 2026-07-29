@@ -116,8 +116,11 @@ def run(
 
     typer.echo("running — 'q' to quit, 's' to save a clip")
     previous = time.perf_counter()
+    # Provisional sizing; re-done from the measured loop rate below, because the
+    # real rate is capture + detector + display and is not knowable up front.
     session.set_clip_capacity(30.0)
     processed = 0
+    resized_clip = False
 
     try:
         while True:
@@ -136,11 +139,26 @@ def run(
             cv2.imshow(WINDOW, annotated)
             processed += 1
 
+            if not resized_clip and processed == 60:
+                # The loop rate has settled: size the buffer to hold the
+                # requested number of *seconds*, not of 30-fps frames.
+                session.set_clip_capacity(session.wall_fps)
+                resized_clip = True
+                logger.info(
+                    "loop settled at %.1f FPS; clip buffer holds %d frames (%.1f s)",
+                    session.wall_fps,
+                    session.clip.maxlen or 0,
+                    clip_seconds,
+                )
+
             if processed % 60 == 0:
                 logger.info(
-                    "%.1f FPS | tracks %d | coasting %d | dormant %d | resurrected %d",
+                    "%.1f FPS (%.1f processing) | tracks %d | ids %d | coasting %d "
+                    "| dormant %d | resurrected %d",
+                    info["wall_fps"],
                     info["fps"],
                     info["tracks"],
+                    info["reported_ids"],
                     info["coasting"],
                     info["dormant"],
                     info["resurrected"],
@@ -150,7 +168,7 @@ def run(
             if key == ord("q"):
                 break
             if key == ord("s"):
-                path = session.save_clip(out_dir, session.fps or 15.0)
+                path = session.save_clip(out_dir, session.wall_fps or 15.0)
                 typer.echo(f"saved {path}" if path else "nothing buffered yet")
             if max_frames and processed >= max_frames:
                 break
@@ -158,11 +176,29 @@ def run(
         capture.release()
         cv2.destroyAllWindows()
 
+    # Report the identities that were actually shown, not the mint counter.
+    # n_ids_issued includes tentative births that never survive n_init frames —
+    # on a live webcam a single flicker of a false detection bumps it, so it
+    # reads as ID churn when nothing churned.
+    reported = session.reported_ids
+    held = [
+        (session.timeline.held_seconds(gid, session.last_now), gid) for gid in reported
+    ]
     typer.echo(
-        f"processed {processed} frames at {session.fps:.1f} FPS; "
-        f"{session.manager.n_ids_issued} global IDs issued, "
+        f"processed {processed} frames at {session.wall_fps:.1f} FPS end-to-end "
+        f"({session.fps:.1f} FPS tracking throughput)"
+    )
+    typer.echo(
+        f"{len(reported)} identities confirmed and shown "
+        f"({session.manager.n_ids_issued} tracks minted incl. tentative), "
         f"{session.manager.dormant.n_resurrected} resurrected from the gallery"
     )
+    if held:
+        longest, gid = max(held)
+        typer.echo(f"longest-held identity: ID {gid} for {longest:.1f} s")
+    if session.timeline.reacquired_gap:
+        gid, gap = max(session.timeline.reacquired_gap.items(), key=lambda kv: kv[1])
+        typer.echo(f"longest gap survived: ID {gid} reacquired after {gap:.1f} s")
 
 
 if __name__ == "__main__":  # pragma: no cover
