@@ -967,16 +967,26 @@ class GlobalIDManager:
 
         queries = []
         usable: list[GlobalTrack] = []
+        contexts: list[str] = []
         for track in candidates:
             ema = track.gallery.ema
             if ema is None:
                 continue
             queries.append(ema)
             usable.append(track)
+            # Provenance for the probe log. `hits` matters: a candidate probes
+            # the gallery from its second measured frame, when a person walking
+            # back into view is still half inside the frame, so a rejection at
+            # low hits accuses the crop rather than the threshold.
+            sigma = float(np.sqrt(np.trace(track.cov[:2, :2]) / 2.0))
+            contexts.append(
+                f"frame {frame} track id {track.global_id} hits {track.hits} "
+                f"gallery {len(track.gallery)} sigma {sigma:.2f}m"
+            )
         if not usable:
             return
 
-        for index, global_id, distance in self.dormant.match(np.stack(queries)):
+        for index, global_id, distance in self.dormant.match(np.stack(queries), contexts):
             track = usable[index]
             entry = self.dormant.pop(global_id)
             old_id = track.global_id

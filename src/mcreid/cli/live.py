@@ -20,6 +20,8 @@ import cv2
 import numpy as np
 import typer
 
+from mcreid.fusion.dormant import DormantConfig
+from mcreid.fusion.global_id import FusionConfig
 from mcreid.live import (
     LiveConfig,
     LiveSession,
@@ -62,6 +64,15 @@ def run(
     ),
     span_m: float = typer.Option(
         6.0, help="Assumed floor span of the frame height when uncalibrated."
+    ),
+    dormant_gate: float = typer.Option(
+        None,
+        help=(
+            "Override the dormant (long-gap) appearance gate. Leave unset to use "
+            "the shipped 0.42. Every probe's true distance is logged either way, "
+            "so measure first and only then loosen. Must stay <= "
+            "revive_appearance_distance (0.48)."
+        ),
     ),
     clip_seconds: float = typer.Option(8.0, help="Length of the save-clip buffer."),
     out_dir: Path = typer.Option(Path("reports"), help="Where 's' saves clips."),
@@ -107,11 +118,19 @@ def run(
             weights=weights, imgsz=imgsz, conf_threshold=conf, embedder=embedder
         ),
     )
+    fusion_config = None
+    if dormant_gate is not None:
+        fusion_config = FusionConfig(
+            dormant=DormantConfig(appearance_distance=dormant_gate)
+        )
+        typer.echo(f"dormant appearance gate overridden: {dormant_gate:.2f}")
+
     session = LiveSession(
         backend=backend,
         calibration=calibration,
         metric=metric,
         config=LiveConfig(span_m=span_m, clip_seconds=clip_seconds),
+        fusion_config=fusion_config,
     )
 
     typer.echo("running — 'q' to quit, 's' to save a clip")
@@ -199,6 +218,16 @@ def run(
     if session.timeline.reacquired_gap:
         gid, gap = max(session.timeline.reacquired_gap.items(), key=lambda kv: kv[1])
         typer.echo(f"longest gap survived: ID {gid} reacquired after {gap:.1f} s")
+
+    # The long-gap path is the one that fails silently: a rejected probe looks
+    # exactly like nobody having returned. Print what the gate actually saw.
+    for line in session.manager.dormant.probe_report():
+        typer.echo(line)
+    if session.manager.dormant.n_collapsed:
+        typer.echo(
+            f"{session.manager.dormant.n_collapsed} duplicate dormant "
+            f"identity/identities collapsed (same person stored twice)"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

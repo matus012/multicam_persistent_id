@@ -13,6 +13,7 @@ import pytest
 
 from mcreid.calib.schema import RigCalib
 from mcreid.fusion.associate import AssociationConfig
+from mcreid.fusion.dormant import DormantConfig
 from mcreid.fusion.global_id import FusionConfig, GlobalIDManager
 from mcreid.fusion.types import TrackState, ViewObservation
 from mcreid.sim.toy import bedroom_rig
@@ -204,3 +205,90 @@ def test_fusion_config_rejects_bad_lifecycle_params() -> None:
         FusionConfig(n_init=0)
     with pytest.raises(ValueError, match="max_coast_frames"):
         FusionConfig(max_coast_frames=0)
+
+
+# --- the leave/return cascade: one missed resurrection must not deadlock -----------------
+
+
+def _visit(
+    mgr: GlobalIDManager,
+    cams: tuple[VirtualCamera, ...],
+    embedding: FloatArray,
+    start: int,
+    frames: int,
+    foot_xy: tuple[float, float] = (2.5, 2.5),
+) -> int:
+    """Someone stands in the room for `frames` frames. Returns the next frame index."""
+    for offset in range(frames):
+        frame = start + offset
+        mgr.step(_views_for_all_cameras(cams, foot_xy, embedding, frame), frame, DT)
+    return start + frames
+
+
+def _absence(mgr: GlobalIDManager, start: int, frames: int) -> int:
+    """Nobody in view: long enough for the track to coast, go lost, and retire."""
+    for offset in range(frames):
+        frame = start + offset
+        mgr.step([], frame, DT)
+    return start + frames
+
+
+def _split_pair(dim: int, separation: float) -> tuple[FloatArray, FloatArray, FloatArray]:
+    """Two appearances of one person `separation` apart, and their midpoint."""
+    first, axis = np.zeros(dim), np.zeros(dim)
+    first[0], axis[1] = 1.0, 1.0
+    cosine = 1.0 - separation
+    second = cosine * first + np.sqrt(1.0 - cosine**2) * axis
+    midpoint = first + second
+    return first, second, midpoint / np.linalg.norm(midpoint)
+
+
+def _leave_return_cascade(duplicate_distance: float) -> tuple[GlobalIDManager, list[int]]:
+    """Sit / leave / return-and-be-missed / leave / return again.
+
+    The appearance on the second visit sits at 0.45 from the stored vector —
+    just past the 0.42 dormant gate, which is what the real webcam run did — so
+    the first return is *missed* and mints a fresh ID. That failure is what puts
+    a second copy of this person in the gallery. The third visit is then the one
+    that must still recover the original identity.
+    """
+    cams = bedroom_rig()
+    config = FusionConfig(dormant=DormantConfig(duplicate_distance=duplicate_distance))
+    mgr = GlobalIDManager(_rig(), config)
+    first, second, midpoint = _split_pair(16, separation=0.45)
+
+    # Absence must outlast coasting *and* the revive window, so the track truly
+    # retires into the dormant gallery instead of being revived by motion.
+    gone = config.max_coast_frames + config.reid_window_frames + 10
+
+    frame = _visit(mgr, cams, first, start=0, frames=40)
+    frame = _absence(mgr, frame, gone)
+    ids_after_first_absence = mgr.dormant.ids
+
+    frame = _visit(mgr, cams, second, start=frame, frames=20)
+    frame = _absence(mgr, frame, gone)
+
+    frame = _visit(mgr, cams, midpoint, start=frame, frames=20)
+    live = [t.global_id for t in mgr.tracks if t.is_visible]
+    assert ids_after_first_absence == [1], "the first identity must reach the gallery"
+    return mgr, live
+
+
+def test_a_missed_resurrection_deadlocks_the_gallery_without_the_duplicate_check() -> None:
+    """The bug, reproduced: proves the test below is testing something real."""
+    mgr, live = _leave_return_cascade(duplicate_distance=0.0)
+
+    assert mgr.dormant.n_resurrected == 0, "the deadlock means nothing is ever recovered"
+    assert live and 1 not in live, f"the original identity stays lost, got {live}"
+    assert mgr.dormant.n_rejected_ambiguous >= 1, (
+        "and it is the ratio test doing it — two stored copies of the same person"
+    )
+
+
+def test_the_original_identity_survives_a_missed_resurrection() -> None:
+    """The fix: the third visit recovers ID 1, not a fourth new number."""
+    mgr, live = _leave_return_cascade(duplicate_distance=0.48)
+
+    assert mgr.dormant.n_collapsed == 1, "the two stored copies must be recognised as one"
+    assert mgr.dormant.n_resurrected == 1
+    assert live == [1], f"the returning person must carry the original id, got {live}"

@@ -148,16 +148,166 @@ def test_different_identity_is_rejected():
     assert gallery.match(_identity(41)[:1]) == [], "a different identity must not match"
 
 
-def test_ratio_test_rejects_ambiguous_candidates():
-    """Two stored identities that both fit equally well identify nobody."""
-    gallery = DormantGallery(DormantConfig(appearance_distance=1.5, ratio_test=0.85))
-    base = _identity(50, n=8)
-    # Two near-duplicate identities: any query fits both about equally.
-    gallery.admit(1, base, frame=0, hits=50)
-    gallery.admit(2, base + 1e-6, frame=0, hits=50)
+def _pair_at(separation: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Two identities exactly ``separation`` apart, plus a query equidistant.
 
-    assert gallery.match(base[:1]) == [], "ambiguous evidence must resurrect nothing"
+    Built analytically rather than sampled, because both the ratio test and the
+    duplicate check turn on where these distances sit relative to two different
+    thresholds, and a noisy draw that lands on the wrong side of either makes
+    the test assert something other than what it says.
+    """
+    first, second_axis = np.zeros(DIM), np.zeros(DIM)
+    first[0], second_axis[1] = 1.0, 1.0
+    cosine = 1.0 - separation
+    second = cosine * first + np.sqrt(1.0 - cosine**2) * second_axis
+    query = _unit(first + second)  # equidistant from both by symmetry
+    return first, second, query
+
+
+def test_ratio_test_rejects_ambiguous_candidates():
+    """Two *different* stored identities that both fit equally well identify nobody.
+
+    They must be far enough apart to be genuinely two people — otherwise this
+    asserts the duplicate-collapse path instead, which is the opposite outcome.
+    """
+    first, second, query = _pair_at(separation=0.70)
+    gallery = DormantGallery(
+        DormantConfig(appearance_distance=1.5, ratio_test=0.85, duplicate_distance=0.48)
+    )
+    gallery.admit(1, first[None, :], frame=0, hits=50)
+    gallery.admit(2, second[None, :], frame=0, hits=50)
+
+    assert gallery.match(query[None, :]) == [], "ambiguous evidence must resurrect nothing"
     assert gallery.n_rejected_ambiguous >= 1
+    assert gallery.n_collapsed == 0, "0.70 apart is two people, not one stored twice"
+    assert len(gallery) == 2
+
+
+def test_contested_duplicates_collapse_into_the_senior_identity():
+    """The ratio test's premise fails when the contenders are the same person."""
+    first, second, query = _pair_at(separation=0.45)
+    gallery = DormantGallery(
+        DormantConfig(appearance_distance=0.42, ratio_test=0.85, duplicate_distance=0.48)
+    )
+    gallery.admit(1, first[None, :], frame=0, hits=609)
+    gallery.admit(2, second[None, :], frame=100, hits=40)
+
+    matches = gallery.match(query[None, :])
+
+    assert [gid for _row, gid, _d in matches] == [1], (
+        f"the original identity must be the one resurrected, got {matches}"
+    )
+    assert gallery.n_collapsed == 1
+    # `match` reports; the caller pops. Two entries became one.
+    assert len(gallery) == 1 and gallery.ids == [1]
+    assert gallery.entry(1).hits == 649, "the absorbed copy's evidence carries over"
+
+
+def test_collapse_keeps_the_higher_evidence_identity_regardless_of_id_order():
+    """Seniority is accumulated evidence first — not whichever ID is smaller."""
+    first, second, query = _pair_at(separation=0.45)
+    gallery = DormantGallery(DormantConfig(appearance_distance=0.42))
+    gallery.admit(7, first[None, :], frame=0, hits=12)
+    gallery.admit(9, second[None, :], frame=50, hits=800)
+
+    matches = gallery.match(query[None, :])
+    assert [gid for _row, gid, _d in matches] == [9]
+
+
+def test_collapse_can_be_disabled():
+    """The escape hatch is configurable, and off means the deadlock stands."""
+    first, second, query = _pair_at(separation=0.45)
+    gallery = DormantGallery(
+        DormantConfig(appearance_distance=0.42, duplicate_distance=0.0)
+    )
+    gallery.admit(1, first[None, :], frame=0, hits=609)
+    gallery.admit(2, second[None, :], frame=100, hits=40)
+
+    assert gallery.match(query[None, :]) == []
+    assert gallery.n_collapsed == 0
+
+
+def test_collapse_needs_the_query_to_match_something():
+    """Two stored copies of a stranger must not be collapsed by an unrelated query.
+
+    Entry-to-entry similarity alone is not standing to rewrite identities: the
+    check only fires when a live candidate is actually contesting *these* two.
+    """
+    first, second, _query = _pair_at(separation=0.45)
+    stranger = np.zeros(DIM)
+    stranger[5] = 1.0  # orthogonal to both — distance 1.0 to each
+    gallery = DormantGallery(DormantConfig(appearance_distance=0.42))
+    gallery.admit(1, first[None, :], frame=0, hits=50)
+    gallery.admit(2, second[None, :], frame=0, hits=50)
+
+    assert gallery.match(stranger[None, :]) == []
+    assert gallery.n_collapsed == 0, "no query evidence, no irreversible collapse"
+    assert len(gallery) == 2
+
+
+def test_gallery_is_deduplicated_even_when_the_query_misses_the_gate():
+    """De-duplication is gallery hygiene, not an identity claim about the query.
+
+    The run that motivated this fix probed at ~0.45 against a 0.42 gate. If the
+    collapse required the query to clear the resurrection gate, it could never
+    fire on exactly the distances that create the duplicate — the fix would be a
+    no-op on its own bug report. So this probe resurrects nothing (correctly:
+    0.45 is outside the gate) while still leaving a gallery that is no longer
+    deadlocked.
+    """
+    first, second, midpoint = _pair_at(separation=0.45)
+    third_axis = np.zeros(DIM)
+    third_axis[2] = 1.0
+    # Tilt out of the plane until the query sits 0.45 from both entries.
+    cosine_to_midpoint = 0.55 / float(midpoint @ first)
+    query = _unit(
+        cosine_to_midpoint * midpoint + np.sqrt(1.0 - cosine_to_midpoint**2) * third_axis
+    )
+
+    gallery = DormantGallery(
+        DormantConfig(appearance_distance=0.42, duplicate_distance=0.48)
+    )
+    gallery.admit(1, first[None, :], frame=0, hits=609)
+    gallery.admit(2, second[None, :], frame=100, hits=40)
+
+    assert gallery.match(query[None, :]) == [], "0.45 is outside the 0.42 gate"
+    assert gallery.n_collapsed == 1, "but the duplicate must still be cleared"
+    assert gallery.ids == [1]
+
+    # The gallery is now clean, so a closer look recovers the original identity.
+    assert [gid for _r, gid, _d in gallery.match(first[None, :])] == [1]
+
+
+def test_one_failed_resurrection_does_not_deadlock_the_gallery():
+    """The full cascade, at the gallery level.
+
+    Leave once, fail to be recognised (so a second copy of the same person is
+    stored under a new ID), leave again, come back: the *original* identity must
+    be recovered. Before the duplicate check existed, the second return was
+    rejected as ambiguous forever, because the two candidates it could not
+    separate were both this person.
+    """
+    first, second, query = _pair_at(separation=0.45)
+    config = DormantConfig(appearance_distance=0.42, ratio_test=0.85)
+
+    # Visit 1 ends: the identity is stored.
+    gallery = DormantGallery(config)
+    gallery.admit(1, first[None, :], frame=0, hits=609)
+
+    # Visit 2 begins: the gate misses by 0.03 and the person is minted afresh.
+    assert gallery.match(second[None, :]) == [], "reproduces the observed 0.45 > 0.42 miss"
+    assert gallery.attempts[-1].outcome == "rejected_gate"
+    assert gallery.attempts[-1].ranked[0] == (1, pytest.approx(0.45, abs=1e-9))
+
+    # Visit 2 ends: a duplicate of the same person joins the gallery.
+    gallery.admit(2, second[None, :], frame=100, hits=40)
+
+    # Visit 3: the deadlock would strike here.
+    matches = gallery.match(query[None, :])
+    assert [gid for _row, gid, _d in matches] == [1], (
+        f"must recover the original identity, got {matches}"
+    )
+    assert gallery.n_collapsed == 1
 
 
 def test_match_is_one_to_one():
