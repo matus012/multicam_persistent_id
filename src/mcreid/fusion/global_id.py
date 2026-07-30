@@ -582,8 +582,12 @@ class GlobalIDManager:
         """Advance the fusion stage by one frame. Returns the visible tracks."""
         if frame <= self._frame:
             raise ValueError(f"frames must increase: got {frame} after {self._frame}")
-        if dt <= 0.0:
-            raise ValueError(f"dt must be positive, got {dt}")
+        # `not (dt > 0)` rather than `dt <= 0`, because NaN fails every comparison
+        # and would slip through the latter. A NaN dt used to be a one-frame
+        # nuisance; since the dormant TTL became an accumulator it is permanent —
+        # `_elapsed_s` goes NaN and nothing can ever expire again.
+        if not dt > 0.0 or dt == float("inf"):
+            raise ValueError(f"dt must be positive and finite, got {dt}")
         self._frame = frame
         self._last_dt = dt
 

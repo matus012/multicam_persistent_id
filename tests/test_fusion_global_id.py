@@ -730,3 +730,84 @@ def test_a_retry_adoption_is_a_VISIBLE_id_switch_in_step_output() -> None:
     )
     assert after == {dormant_id}, f"the track must end up under the dormant id, got {after}"
     assert mgr.dormant.n_retries_fired >= 1, "and it must be the retry that did it"
+
+
+# --- the dormant clock's call-count invariant, pinned at its one call site ----
+
+
+def test_step_expires_the_dormant_gallery_exactly_once() -> None:
+    """The TTL clock is an accumulator, so the CALL COUNT is load-bearing.
+
+    Adversarial review removed `dormant.expire()` from `step()` entirely, and
+    separately made it fire twice per step — halving every TTL — and the whole
+    suite passed both times. Nothing observed the call site. It does now.
+    """
+    cams = bedroom_rig()
+    mgr = GlobalIDManager(_rig())
+    embed = _unit_embedding(16, 0)
+
+    calls: list[tuple[int, float]] = []
+    real_expire = mgr.dormant.expire
+
+    def counting_expire(frame: int, dt: float) -> list[int]:
+        calls.append((frame, dt))
+        return real_expire(frame, dt)
+
+    mgr.dormant.expire = counting_expire  # type: ignore[method-assign]
+
+    for frame in range(6):
+        mgr.step(_views_for_all_cameras(cams, (3.0, 2.5), embed, frame), frame, DT)
+
+    assert len(calls) == 6, f"expected one expire() per step, got {len(calls)}"
+    assert [f for f, _ in calls] == list(range(6))
+    assert all(dt == DT for _, dt in calls), "and it must be handed the step's own dt"
+
+
+def test_a_dormant_identity_survives_to_its_ttl_and_dies_after() -> None:
+    """End-to-end TTL, driven through step() rather than the gallery directly.
+
+    Kills the mutant that deletes expiry from step() altogether: with no expiry
+    the identity never leaves, and the second half of this test fails.
+    """
+    cams = bedroom_rig()
+    ttl_s = 2.0
+    cfg = FusionConfig(
+        n_init=2,
+        max_coast_frames=2,
+        reid_window_frames=2,
+        dormant=DormantConfig(ttl_s=ttl_s, min_hits=1),
+    )
+    mgr = GlobalIDManager(_rig(), cfg)
+    embed = _unit_embedding(16, 0)
+
+    frame = 0
+    for _ in range(6):  # confirm, then let it die into the gallery
+        mgr.step(_views_for_all_cameras(cams, (3.0, 2.5), embed, frame), frame, DT)
+        frame += 1
+    for _ in range(8):
+        mgr.step([], frame, DT)
+        frame += 1
+    assert len(mgr.dormant) == 1, "the identity should have retired into the gallery"
+
+    half = int((ttl_s / 2) / DT)
+    for _ in range(half):
+        mgr.step([], frame, DT)
+        frame += 1
+    assert len(mgr.dormant) == 1, "must still be resurrectable at half its TTL"
+
+    for _ in range(int(ttl_s / DT) + 10):
+        mgr.step([], frame, DT)
+        frame += 1
+    assert len(mgr.dormant) == 0, "and must be gone once the TTL has elapsed"
+
+
+def test_step_rejects_a_non_finite_dt() -> None:
+    """NaN fails every comparison, so `dt <= 0` let it through.
+
+    It used to cost one bad frame. Since the TTL became an accumulator it is
+    permanent: `_elapsed_s` goes NaN and nothing can ever expire again.
+    """
+    mgr = GlobalIDManager(_rig())
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive and finite"):
+            mgr.step([], 0, bad)

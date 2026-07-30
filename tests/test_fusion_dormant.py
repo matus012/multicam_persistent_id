@@ -560,16 +560,55 @@ def test_ttl_is_measured_in_accumulated_seconds_not_frames() -> None:
         )
 
 
-def test_the_clock_advances_even_when_the_gallery_is_empty() -> None:
-    """Otherwise time stops while nobody is dormant and every later TTL is short."""
+def test_the_clock_is_an_accumulator_and_can_be_read_directly() -> None:
+    """Assert on `_elapsed_s` itself, because the black-box version cannot fail.
+
+    This replaces a test that claimed to catch a clock that stalls on an empty
+    gallery. It could not: adversarial review showed it passing against exactly
+    that mutant, and against the original frame-based bug too. The reason is
+    structural — every age is a difference of two samples of one accumulator, and
+    an entry only ages while it is IN the gallery, so an empty-gallery stall is
+    unobservable through admit/expire. Asserting the accumulator directly is the
+    only way this property can be checked at all.
+    """
     gallery = DormantGallery(DormantConfig(ttl_s=10.0))
-    for frame in range(1, 301):  # 10 s of empty-gallery steps
+    for frame in range(1, 301):
         gallery.expire(frame=frame, dt=1 / 30)
+    assert gallery._elapsed_s == pytest.approx(10.0, abs=1e-6)
 
     gallery.admit(1, _identity(72), frame=300, hits=50)
+    assert gallery.entry(1).retired_elapsed_s == pytest.approx(10.0, abs=1e-6), (
+        "admission must stamp the clock, not zero"
+    )
     for frame in range(301, 451):  # 5 s dormant
         assert gallery.expire(frame=frame, dt=1 / 30) == [], (
-            "the entry is 5 s old; the 10 s already elapsed before it existed "
-            "must not count against it"
+            "the entry is 5 s old; the 10 s that elapsed before it existed must "
+            "not count against it"
         )
     assert 1 in gallery
+
+
+def test_calling_expire_twice_in_one_step_halves_every_ttl() -> None:
+    """The invariant the accumulator created, stated as a fact about misuse.
+
+    Not a wish: this is what happens, so it is written down as a test rather than
+    only as a docstring line. `GlobalIDManager.step` owns the single call site;
+    `test_step_expires_the_dormant_gallery_exactly_once` is what guards it there.
+    """
+    def lifetime(calls_per_step: int) -> float:
+        gallery = DormantGallery(DormantConfig(ttl_s=10.0))
+        gallery.admit(1, _identity(73), frame=0, hits=50)
+        dt, frame = 1 / 30, 0
+        while len(gallery):
+            frame += 1
+            for _ in range(calls_per_step):
+                gallery.expire(frame=frame, dt=dt)
+            assert frame < 100_000
+        return frame * dt
+
+    once = lifetime(1)
+    twice = lifetime(2)
+    assert once == pytest.approx(10.0, abs=0.1)
+    assert twice == pytest.approx(5.0, abs=0.1), (
+        f"a second call per step must halve the TTL, got {twice:.2f}s"
+    )

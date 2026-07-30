@@ -387,7 +387,10 @@ class DormantGallery:
             return False
 
         if len(self._entries) >= self.config.max_entries and global_id not in self._entries:
-            oldest = min(self._entries.values(), key=lambda e: e.retired_frame)
+            # Key off the same clock the TTL uses. Through GlobalIDManager frames
+            # increase monotonically so the two orderings agree, but keeping two
+            # notions of "oldest" invites them to disagree later.
+            oldest = min(self._entries.values(), key=lambda e: e.retired_elapsed_s)
             del self._entries[oldest.global_id]
             # Eviction is a removal like any other. Skipping this strands retry
             # state that both blocks re-arming and outlives the entry it belongs to.
@@ -421,8 +424,23 @@ class DormantGallery:
         """Drop identities past their TTL. Returns the ids removed.
 
         Advances the gallery's own elapsed clock by ``dt`` and expires on
-        accumulated seconds. Must be called once per step even when the gallery
-        is empty, or the clock stops and every later TTL is understated.
+        accumulated seconds.
+
+        **Call this exactly once per step.** The clock is an accumulator, so the
+        call count is now load-bearing in a way the old frame-based arithmetic
+        was not: calling twice in one step advances it by ``2 * dt`` and halves
+        every TTL in the gallery (measured: 600 s TTL enforced at 300 s), and
+        skipping steps stretches them (skip 90 % -> 10x). Neither is detectable
+        from the outside — nothing throws, identities simply live for the wrong
+        length of time. `GlobalIDManager.step` owns the single call site, and
+        `test_step_expires_the_dormant_gallery_exactly_once` pins it there.
+
+        Skipping the call while the gallery is *empty* is harmless, contrary to
+        an earlier version of this docstring: every age is a difference of two
+        samples of the same accumulator, and an entry can only accrue age while
+        it is in the gallery — i.e. while the gallery is non-empty. Advancing
+        first is kept because it is simpler to reason about, not because
+        correctness depends on it.
         """
         self._elapsed_s += max(dt, 0.0)
         if not self._entries:
