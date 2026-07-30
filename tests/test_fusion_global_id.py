@@ -344,3 +344,68 @@ def test_an_adopted_track_stops_shopping_the_gallery() -> None:
     assert [t.global_id for t in mgr.tracks] == [41], "the adopted identity must stick"
     assert mgr.dormant.n_resurrected == 1, "and no second identity may be consumed"
     assert 77 in mgr.dormant
+
+
+# --- probe instrumentation (D1): a rejection is only actionable with provenance ----------
+
+
+def test_a_long_gap_probe_records_its_provenance() -> None:
+    """Every dormant probe must say what it was made from, not just its distance.
+
+    The path that fires on a return is `_resurrect`, which probes from a birth
+    cluster rather than from a track. It was shipped without provenance while the
+    rarely-taken tentative-track path had it, so the live log showed a bare
+    distance and could not distinguish a too-tight gate from a half-body query.
+    """
+    cams = bedroom_rig()
+    mgr = GlobalIDManager(_rig())
+    person = _unit_embedding(16, 0)
+
+    frame = _visit(mgr, cams, person, start=0, frames=40)
+    frame = _absence(mgr, frame, mgr.config.max_coast_frames + mgr.config.reid_window_frames + 10)
+    assert mgr.dormant.ids == [1], "test setup: the identity must be dormant"
+
+    _visit(mgr, cams, person, start=frame, frames=3)
+
+    assert mgr.dormant.attempts, "the return must have produced a recorded probe"
+    context = mgr.dormant.attempts[0].context
+    assert context, "a probe with no provenance is the defect this test guards"
+    for token in ("camera", "truncated", "sigma"):
+        assert token in context, f"provenance must report {token!r}, got {context!r}"
+
+
+def test_a_clipped_box_is_flagged_truncated() -> None:
+    """The half-body signal must survive into the observation, not just the covariance.
+
+    A clipped box already inflates the positional covariance, but a covariance
+    says nothing about whether the *appearance* vector is trustworthy, and that
+    is what a long-gap probe rides on.
+    """
+    cams = bedroom_rig()
+    mgr = GlobalIDManager(_rig())
+    cam = cams[0]
+    width, height = cam.to_calib().intrinsics.image_size
+    embed = _unit_embedding(16, 0)
+
+    whole = ViewObservation(
+        camera_id=cam.camera_id,
+        frame=0,
+        local_track_id=1,
+        bbox_xyxy=np.array([width * 0.4, height * 0.3, width * 0.5, height * 0.6]),
+        embedding=embed,
+        score=0.9,
+    )
+    clipped = ViewObservation(
+        camera_id=cam.camera_id,
+        frame=0,
+        local_track_id=2,
+        # Runs off the bottom edge: the feet are outside the frame entirely.
+        bbox_xyxy=np.array([width * 0.4, height * 0.5, width * 0.5, float(height)]),
+        embedding=embed,
+        score=0.9,
+    )
+
+    by_track = {o.local_track_id: o for o in mgr.project_observations([whole, clipped], frame=0)}
+    assert by_track[1].truncated is False, "a box inside the frame is not truncated"
+    assert by_track[2].truncated is True, "a box clipped by the frame edge must be flagged"
+    assert by_track[2].position_sigma_m > by_track[1].position_sigma_m

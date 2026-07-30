@@ -68,6 +68,15 @@ class GroundObservation:
     world_cov: FloatArray  # (2, 2) m^2 — pixel noise propagated through the homography
     embedding: FloatArray
     score: float
+    truncated: bool = False
+    """The source box was clipped by the frame edge, so this is a half-body crop.
+
+    Already reflected in ``world_cov`` (inflated, because the feet are missing and
+    the foot point is a guess). Carried separately because it also says something
+    about the *appearance* vector, which no covariance can express: a crop of half
+    a person is a bad ReID query, and a long-gap probe built from one fails at any
+    threshold. Without this, a rejected probe cannot be attributed to a tight gate
+    versus a bad query, and those want opposite fixes."""
 
     @property
     def position_sigma_m(self) -> float:

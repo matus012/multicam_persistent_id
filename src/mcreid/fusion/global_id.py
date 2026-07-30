@@ -435,6 +435,25 @@ class _Cluster:
         return max(o.score for o in self.observations)
 
 
+def _cluster_context(cluster: _Cluster, frame: int) -> str:
+    """Provenance for a long-gap probe made from a freshly seen person.
+
+    This is the path that fires on a return, and it probes from a **single
+    frame's** observations — there is no track yet, so there is no hit count to
+    report. The evidence available is how many cameras saw it, whether any box
+    was clipped by the frame edge (a half-body crop is a bad ReID query at any
+    threshold), and the resulting positional sigma. Those are what separate "the
+    gate is too tight" from "the query was rubbish".
+    """
+    truncated = sum(1 for o in cluster.observations if o.truncated)
+    sigma = max(o.position_sigma_m for o in cluster.observations)
+    return (
+        f"frame {frame} new cluster (no track yet): {len(cluster.observations)} obs "
+        f"from {len(cluster.cameras)} camera(s), {truncated} truncated, "
+        f"sigma {sigma:.2f}m, score {cluster.score:.2f}"
+    )
+
+
 class GlobalIDManager:
     """Owns the global track set and the ID counter."""
 
@@ -513,6 +532,7 @@ class GlobalIDManager:
                         local_track_id=view.local_track_id,
                         world_xy=world[i],
                         world_cov=cov,
+                        truncated=bool(truncated[i]),
                         embedding=np.asarray(view.embedding, dtype=np.float64),
                         score=view.score,
                     )
@@ -842,7 +862,7 @@ class GlobalIDManager:
             return clusters
 
         queries = np.stack([c.embedding for c in clusters])
-        matches = self.dormant.match(queries)
+        matches = self.dormant.match(queries, [_cluster_context(c, frame) for c in clusters])
         if not matches:
             return clusters
 
@@ -999,8 +1019,8 @@ class GlobalIDManager:
             # low hits accuses the crop rather than the threshold.
             sigma = float(np.sqrt(np.trace(track.cov[:2, :2]) / 2.0))
             contexts.append(
-                f"frame {frame} track id {track.global_id} hits {track.hits} "
-                f"gallery {len(track.gallery)} sigma {sigma:.2f}m"
+                f"frame {frame} tentative track id {track.global_id}: hits "
+                f"{track.hits}, gallery {len(track.gallery)}, sigma {sigma:.2f}m"
             )
         if not usable:
             return
