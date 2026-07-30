@@ -71,6 +71,10 @@ htmlcov/
 /status.txt
 /context.md
 /capture_guide.md
+# Agent instructions: workflow preferences, machine specs and process notes.
+# Scaffolding for how the work gets done, not documentation of what was built,
+# so it is kept local rather than shipped in a portfolio repo.
+/CLAUDE.md
 
 # --- editors / OS ---
 .vscode/
