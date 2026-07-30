@@ -188,6 +188,14 @@ detections rather than by identity confusion.
 | beyond 0.35 m | — | 64 % |
 | beyond 1.00 m (clustering radius) | 0 % | **31 %** |
 
+> **No artifact backs this table.** It was measured during development from
+> WILDTRACK's two independent annotation streams versus detector output; the
+> script was exploratory and was not retained, and no CLI subcommand regenerates
+> it. Every other table in this document traces to a committed JSON under
+> [`artifacts/`](artifacts/README.md). This one does not, and adding a
+> `mcreid-wildtrack footpoint` command is the highest-value gap to close, because
+> this is the measurement the whole failure analysis rests on.
+
 The homography is fine. The *input* to it is not: a detection box bottom edge is
 the ground-contact point only when the feet are visible, and in a crowd they are
 occluded by whoever stands in front, truncating the box high. A third of the same

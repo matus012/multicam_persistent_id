@@ -14,6 +14,8 @@ crops, no imagery of any kind is redistributed here.
 | `wildtrack_eval_osnet_geomerge.json` | same, with the unconditional geometric merge enabled | the rejected-intervention row: MODA −1.168, switches 680 (worse) |
 | `reid_separation.json` | `mcreid-wildtrack` separation measurement | the embedder table: ImageNet 0.377/0.409 (sep 0.032) vs OSNet 0.525/0.623 (sep 0.098), over 35 597 same-identity and 1 519 230 different-identity cross-camera pairs |
 | `wildtrack_calib_summary.json` | `mcreid-wildtrack calib-report` | the converter cross-check: 2.97–15.3 px median per camera over 2249 samples |
+| `wildtrack_run_40frames.json` | `mcreid-wildtrack run --n-frames 40` | the 40-frame table in `../wildtrack_results.md`: 149 IDs reported against 63 people, 76 switches (1.21/person), RMSE 0.391 m, 80 FP tracks, coverage median 0.577, 10.6 FPS/cam |
+| `wildtrack_run_40frames_geomerge.json` | same, geometric merge enabled | its ablation column: 99 switches, RMSE 0.403 m |
 
 ## What these do and do not establish
 
@@ -30,9 +32,25 @@ than anything in the matcher. See `../wildtrack_results.md`.
 
 ## Not reproducible from this repo
 
-Two development measurements are quoted in source comments but have **no artifact
-here**, because the harness that produced them was exploratory and was not kept:
-the entry-merge false-fusion rate (40.5 %) and the near-miss provenance error rate
-(45 %) in `src/mcreid/fusion/dormant.py`. They are recorded there as the reason
-those mechanisms ship disabled, and are flagged in that docstring as not citable.
-The *behaviour* they justify is pinned by `tests/test_fusion_dormant.py`.
+Three measurements are quoted elsewhere but have **no artifact here**, because the
+scripts that produced them were exploratory and were not kept. Each is flagged at
+its point of use rather than left to look artifact-backed:
+
+1. **The foot-point table** — GT boxes 0.12 m vs detector boxes 1.60 m mean,
+   4.50 m p90, 31 % beyond the clustering radius. This is the headline finding of
+   the whole stress test and the justification for the v2 roadmap, and it is the
+   most valuable gap to close: a `mcreid-wildtrack footpoint` subcommand that
+   recomputes it from the dataset's two annotation streams would make the
+   project's central claim independently checkable. Its *consequences* are
+   artifact-backed here (precision 26.9 %, ~2.5× duplicate detections, three null
+   interventions), which is corroboration, not proof.
+2. **The entry-merge false-fusion rate (40.5 %)** and **near-miss provenance error
+   rate (45 %)** in `src/mcreid/fusion/dormant.py`. Recorded as the reason those
+   mechanisms ship disabled. The *behaviour* they justify is pinned by
+   `tests/test_fusion_dormant.py`.
+3. **The 1–2 ms/frame per-view tracking + fusion cost.** No benchmark exists in
+   the suite. It establishes only that detection dominates the budget.
+
+The synthetic/cardboard numbers are in a different category: they need no artifact
+because they regenerate deterministically from a seed in about a minute with no
+dataset and no GPU — `uv run mcreid-demo synthetic --scenario cardboard --seed <s>`.

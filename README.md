@@ -116,6 +116,20 @@ ground position, computed independently from two cameras:
 | p90 | 0.21 m | **4.50 m** |
 | beyond the 1.0 m clustering radius | 0 % | **31 %** |
 
+> **Provenance, stated plainly: this table is the one headline number in this
+> README with no committed artifact and no one-command reproduction.** It was
+> measured during development against WILDTRACK's two annotation streams; the
+> script was exploratory and was not kept, and there is no
+> `mcreid-wildtrack` subcommand that regenerates it. Making it reproducible is
+> the first thing this repo should gain.
+>
+> What *is* artifact-backed is everything this table is invoked to explain —
+> precision 26.9 %, ~2.5× more ground-plane detections than people, and three
+> interventions that each moved nothing (all in
+> [`docs/artifacts/`](docs/artifacts/README.md)). The diagnosis is consistent with
+> the verified consequences, but treat the two columns above as the recorded
+> reason for a conclusion rather than as an independently checkable result.
+
 The projection maths is sound — given clean boxes, the cameras agree to 12 cm.
 But the bottom edge of a detection box is the ground-contact point only when the
 feet are visible, and in a crowd they are routinely occluded, so the box
