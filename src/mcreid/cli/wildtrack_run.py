@@ -62,6 +62,36 @@ IMAGE_DIR_PREFIX = "C"
 ANNOTATED_FRAME_STRIDE = 5  # annotations are every 5th frame index
 
 
+def resolve_fusion_config(geometry_only: bool) -> FusionConfig:
+    """Turn the `--geometry-only` flag into a `FusionConfig`.
+
+    Pure and importable so a test can assert the flag actually reaches every
+    field it is supposed to. That is not decoration: the identical pattern in
+    `cli/live.py` — a config built inline in a command body — silently failed to
+    enable a mechanism for an entire live session, because the constructor never
+    mentioned the field and no test could call the resolver. This ablation
+    publishes numbers in the README, so it gets the same treatment.
+
+    Measured on WILDTRACK: the untrained ImageNet embedder separates
+    same-person-cross-camera (0.377) from different-person-cross-camera (0.408)
+    by 0.03 cosine. That is not a threshold-tuning problem — the distributions
+    overlap — so this ablation removes appearance from the decision entirely and
+    lets ground geometry stand on its own.
+    """
+    if not geometry_only:
+        return FusionConfig()
+    return FusionConfig(
+        association=AssociationConfig(
+            weight_geometry=1.0,
+            weight_appearance=0.0,
+            max_appearance_distance=2.0,
+        ),
+        merge_appearance_distance=2.0,
+        revive_appearance_distance=2.0,
+        dormant=DormantConfig(enabled=False),
+    )
+
+
 def _frame_paths(root: Path, camera_index: int) -> list[Path]:
     directory = root / "Image_subsets" / f"{IMAGE_DIR_PREFIX}{camera_index + 1}"
     if not directory.is_dir():
@@ -376,26 +406,9 @@ def run(
         )
         for cam in rig.cameras
     }
+    fusion_config = resolve_fusion_config(geometry_only)
     if geometry_only:
-        # Measured on WILDTRACK: the untrained ImageNet embedder separates
-        # same-person-cross-camera (0.377) from different-person-cross-camera
-        # (0.408) by 0.03 cosine. That is not a threshold-tuning problem — the
-        # distributions overlap — so this ablation removes appearance from the
-        # decision entirely and lets ground geometry stand on its own.
-        association = AssociationConfig(
-            weight_geometry=1.0,
-            weight_appearance=0.0,
-            max_appearance_distance=2.0,
-        )
-        fusion_config = FusionConfig(
-            association=association,
-            merge_appearance_distance=2.0,
-            revive_appearance_distance=2.0,
-            dormant=DormantConfig(enabled=False),
-        )
         typer.echo("GEOMETRY-ONLY ablation: appearance gate disabled")
-    else:
-        fusion_config = FusionConfig()
     manager = GlobalIDManager(rig, fusion_config)
     bev = BevRenderer(rig, canvas_size=(720, 720), grid_step_m=2.0)
     dt = 1.0 / fps

@@ -290,3 +290,30 @@ def test_a_gate_override_alone_does_not_enable_single_occupant_mechanisms() -> N
     assert cfg.dormant.appearance_distance == pytest.approx(0.40)
     assert cfg.dormant.retry_offsets == ()
     assert cfg.dormant.near_miss_margin == 0.0
+
+
+def test_geometry_only_ablation_disables_every_appearance_path() -> None:
+    """Same bug class, swept from the other CLI: --geometry-only built its config
+    inline in the command body with no test, and it publishes README numbers.
+
+    "Geometry only" has to mean ALL FOUR appearance paths are off. Missing one
+    would leave appearance quietly voting in an ablation labelled as having none,
+    which is the kind of error that shows up as an unexplained table row.
+    """
+    from mcreid.cli.wildtrack_run import resolve_fusion_config as resolve_wildtrack
+
+    cfg = resolve_wildtrack(geometry_only=True)
+    assert cfg.association.weight_appearance == 0.0, "association must not vote on appearance"
+    assert cfg.association.weight_geometry == 1.0
+    assert cfg.association.max_appearance_distance == 2.0, "gate open = no appearance veto"
+    assert cfg.merge_appearance_distance == 2.0, "duplicate merge must not veto on appearance"
+    assert cfg.revive_appearance_distance == 2.0, "revival must not veto on appearance"
+    assert cfg.dormant.enabled is False, "the dormant path is appearance-only; it must be off"
+
+
+def test_geometry_only_false_is_exactly_the_shipped_default() -> None:
+    """The ablation must not perturb the baseline it is compared against."""
+    from mcreid.cli.wildtrack_run import resolve_fusion_config as resolve_wildtrack
+    from mcreid.fusion.global_id import FusionConfig
+
+    assert resolve_wildtrack(geometry_only=False) == FusionConfig()
