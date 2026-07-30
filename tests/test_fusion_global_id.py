@@ -374,6 +374,59 @@ def test_a_long_gap_probe_records_its_provenance() -> None:
         assert token in context, f"provenance must report {token!r}, got {context!r}"
 
 
+def test_the_tentative_track_probe_also_reports_truncation() -> None:
+    """Both probe paths must be interpretable, not just the cluster one.
+
+    Cycle 2 produced a rejection from each path. The cluster probe named its
+    truncated count and was diagnosable; the track probe did not, so an
+    identical-looking 0.610 rejection could not be attributed. A probe that
+    cannot be attributed is the same defect D1 exists to remove, one path over.
+    """
+    cams = bedroom_rig()
+    mgr = GlobalIDManager(_rig())
+    person = _unit_embedding(16, 0)
+    other = _unit_embedding(16, 1)
+
+    frame = _visit(mgr, cams, person, start=0, frames=40)
+    frame = _absence(mgr, frame, mgr.config.max_coast_frames + mgr.config.reid_window_frames + 10)
+    assert mgr.dormant.ids == [1]
+
+    # A different-looking person arrives, so the birth cluster is refused and a
+    # tentative track exists to take the second probe.
+    _visit(mgr, cams, other, start=frame, frames=3)
+
+    track_probes = [
+        a for a in mgr.dormant.attempts if "tentative track" in a.context
+    ]
+    assert track_probes, "the tentative-track path must have probed and been recorded"
+    context = track_probes[0].context
+    for token in ("hits", "truncated", "sigma"):
+        assert token in context, f"track provenance must report {token!r}, got {context!r}"
+
+
+def test_truncation_counts_reach_the_track_from_its_measurements() -> None:
+    """The count must come from real observations, not be hardcoded to zero."""
+    cams = bedroom_rig()
+    mgr = GlobalIDManager(_rig())
+    cam = cams[0]
+    width, height = cam.to_calib().intrinsics.image_size
+    embed = _unit_embedding(16, 0)
+
+    clipped = ViewObservation(
+        camera_id=cam.camera_id,
+        frame=0,
+        local_track_id=1,
+        bbox_xyxy=np.array([width * 0.4, height * 0.5, width * 0.5, float(height)]),
+        embedding=embed,
+        score=0.9,
+    )
+    mgr.step([clipped], 0, DT)
+
+    assert len(mgr.tracks) == 1
+    assert mgr.tracks[0].last_observations == 1
+    assert mgr.tracks[0].last_truncated == 1, "a clipped measurement must be counted"
+
+
 def test_a_clipped_box_is_flagged_truncated() -> None:
     """The half-body signal must survive into the observation, not just the covariance.
 

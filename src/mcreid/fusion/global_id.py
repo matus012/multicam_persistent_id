@@ -274,6 +274,9 @@ class GlobalTrack:
         is worth re-storing later. Folding them together makes a brief second
         visit — a few frames — fail the gallery's min_hits and delete the
         identity permanently."""
+        self.last_truncated = 0
+        """Truncated boxes among the most recent frame's measurements."""
+        self.last_observations = 0
         self.suspected_same_as: int | None = None
         """A dormant identity this track probably *is*, having missed it by a hair.
 
@@ -327,6 +330,13 @@ class GlobalTrack:
         self.last_measured_frame = frame
         self.last_measured_xy = self.mean[:2].copy()
         self.supporting_cameras = tuple(sorted({o.camera_id for o in observations}))
+        # Carried purely so a dormant probe made from this track can say whether
+        # the appearance it is querying with came from whole-body crops. The
+        # gallery EMA blends every camera together and loses that, and a probe
+        # rejected on a half-body query wants the opposite fix to one rejected
+        # on a tight threshold.
+        self.last_truncated = sum(1 for o in observations if o.truncated)
+        self.last_observations = len(observations)
 
         # A track that was occluded is confirmed again the moment it is measured;
         # a tentative one only after it has survived n_init frames.
@@ -1020,7 +1030,9 @@ class GlobalIDManager:
             sigma = float(np.sqrt(np.trace(track.cov[:2, :2]) / 2.0))
             contexts.append(
                 f"frame {frame} tentative track id {track.global_id}: hits "
-                f"{track.hits}, gallery {len(track.gallery)}, sigma {sigma:.2f}m"
+                f"{track.hits}, gallery {len(track.gallery)}, "
+                f"{track.last_truncated}/{track.last_observations} truncated, "
+                f"sigma {sigma:.2f}m"
             )
         if not usable:
             return
