@@ -1,0 +1,35 @@
+{
+  "what_this_measures": "same-person cross-camera ground-position disagreement, from GT boxes vs detector boxes. Identical homography, foot-point rule and undistortion in both arms; only the box source differs.",
+  "frames_sampled": 40,
+  "start_frame_slot": 0,
+  "cameras": 7,
+  "detector": {
+    "weights": "weights\\yolo11x.pt",
+    "imgsz": 1280,
+    "conf": 0.25
+  },
+  "iou_threshold": 0.5,
+  "seed": 42,
+  "gt_boxes_seen": 3459,
+  "detector_boxes_attributed": 2109,
+  "people_with_multiview_gt": 987,
+  "people_with_multiview_detections": 674,
+  "gt_boxes": {
+    "n_pairs": 4804,
+    "mean_m": 0.12337912787138394,
+    "p50_m": 0.11969152547773072,
+    "p90_m": 0.20721040112931946,
+    "max_m": 0.41729662247728716,
+    "frac_beyond_0.35m": 0.00395503746877602,
+    "frac_beyond_1.00m": 0.0
+  },
+  "detector_boxes": {
+    "n_pairs": 2054,
+    "mean_m": 0.6193471704270759,
+    "p50_m": 0.3866929341743861,
+    "p90_m": 1.0242088220826593,
+    "max_m": 14.071602553028887,
+    "frac_beyond_0.35m": 0.5774099318403116,
+    "frac_beyond_1.00m": 0.1056475170399221
+  }
+}

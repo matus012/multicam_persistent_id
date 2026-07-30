@@ -116,19 +116,31 @@ ground position, computed independently from two cameras:
 | p90 | 0.21 m | **4.50 m** |
 | beyond the 1.0 m clustering radius | 0 % | **31 %** |
 
-> **Provenance, stated plainly: this table is the one headline number in this
-> README with no committed artifact and no one-command reproduction.** It was
-> measured during development against WILDTRACK's two annotation streams; the
-> script was exploratory and was not kept, and there is no
-> `mcreid-wildtrack` subcommand that regenerates it. Making it reproducible is
-> the first thing this repo should gain.
+> **Provenance, stated plainly.** Reproduce both columns yourself:
 >
-> What *is* artifact-backed is everything this table is invoked to explain —
-> precision 26.9 %, ~2.5× more ground-plane detections than people, and three
-> interventions that each moved nothing (all in
-> [`docs/artifacts/`](docs/artifacts/README.md)). The diagnosis is consistent with
-> the verified consequences, but treat the two columns above as the recorded
-> reason for a conclusion rather than as an independently checkable result.
+> ```bash
+> uv run mcreid-wildtrack footpoint --root data/wildtrack_full --n-frames 40
+> ```
+>
+> The **GT column is confirmed to the digit** — 0.123 m mean, 0.207 m p90, 0 %
+> beyond the radius, over 4804 camera pairs.
+>
+> The **detector column is confirmed in magnitude but not in its exact digits**,
+> because it depends on how permissively a detector box is attributed to an
+> annotated person — a choice the original measurement did not record. Re-measured,
+> the mean ranges 0.62 m → 2.17 m as that gate loosens from IoU 0.5 to 0.1, and the
+> figures above sit inside that range. A strict gate throws away the badly
+> truncated boxes that cause the worst disagreement, which is why it flatters the
+> result. The full sweep and the reasoning are in
+> [`docs/wildtrack_results.md`](docs/wildtrack_results.md); artifacts in
+> [`docs/artifacts/`](docs/artifacts/README.md).
+>
+> **What holds at every threshold tried:** GT boxes agree to 0.12 m and never
+> exceed the clustering radius; detector boxes disagree by 0.39–0.46 m median with
+> a heavy tail, and 58–65 % of pairs exceed the 0.35 m merge radius. The
+> diagnosis — the box's bottom edge, not the homography — is not in question. The
+> headline digits are left exactly as first published rather than quietly
+> restated, pending a decision on which attribution rule to standardise on.
 
 The projection maths is sound — given clean boxes, the cameras agree to 12 cm.
 But the bottom edge of a detection box is the ground-contact point only when the
@@ -234,24 +246,36 @@ ones that cost the most to learn are in [Limitations](#limitations) and
 uv venv --python 3.11 && uv pip install -e ".[dev]"
 ```
 
-Run the whole pipeline on a scripted scene — no footage, no GPU, no dataset:
+Then run the whole pipeline on a scripted scene — no footage, no GPU, no dataset.
+
+**Read this before you run it, because the last line says `FAIL`.**
+
+On the default seed the run does all of the following, and the gate checks each:
+
+| criterion | result |
+|---|---|
+| hero holds its ID through the full 2.5 s four-camera blackout | **PASS** — 75/75 frames |
+| BEV dot alive through the blackout | **PASS** — 75/75 frames |
+| coverage of the hero while visible > 0.95 | **PASS** — 0.988 |
+| no unexplained false-positive tracks | **PASS** — 1, and 1 was injected |
+| zero ID switches, **scene-wide** | **FAIL** — 1 |
+
+That one failure is the *distractor's* switch, not the hero's. The scene contains
+a second person and a persistent false positive on purpose, and the gate counts
+switches across all of them. Rescoping it to the hero would make it pass — and
+would also make it meaningless, because an earlier, laxer version of this gate was
+passed by a 25-line stateless stub with no ReID, no Kalman filter and no lifecycle
+at all. It was left strict instead, so it fails honestly:
 
 ```bash
 uv run mcreid-demo synthetic --scenario cardboard
 ```
 
-> **Expect this to print `cardboard criterion: FAIL (1 of 5)` and exit 1.** That is
-> the honest current bar, not a broken install. On the default seed the hero holds
-> its identity through the whole 2.5 s four-camera blackout and the BEV dot never
-> drops a frame — but the *distractor* takes one ID switch, and the gate is
-> scene-wide, so one switch anywhere fails it. The four other criteria pass. The
-> gate was deliberately left strict rather than rescoped to the hero, because an
-> earlier, laxer version of it was passed by a 25-line stateless stub with no ReID,
-> no Kalman filter and no lifecycle at all. Seeds 7 and 42 are the two of five with
-> a clean hero; see [Results](#results) for the full distribution and
-> [Limitations](#limitations) for why the perfect score is gone.
-
-It writes `outputs/demo/cardboard.mp4` and `.gif`.
+**Expect `cardboard criterion: FAIL (1 of 5)` and exit code 1.** That is the
+current bar, not a broken install. Writes `outputs/demo/cardboard.mp4` and `.gif`.
+Across the five gate seeds the hero is clean on two and takes one switch on three;
+seeds 7 and 42 are the clean ones. Full distribution in [Results](#results), and
+why the former perfect score is gone in [Limitations](#limitations).
 
 Install the perception stack (CUDA 12.6) for anything involving real video:
 

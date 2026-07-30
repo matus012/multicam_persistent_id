@@ -188,13 +188,40 @@ detections rather than by identity confusion.
 | beyond 0.35 m | — | 64 % |
 | beyond 1.00 m (clustering radius) | 0 % | **31 %** |
 
-> **No artifact backs this table.** It was measured during development from
-> WILDTRACK's two independent annotation streams versus detector output; the
-> script was exploratory and was not retained, and no CLI subcommand regenerates
-> it. Every other table in this document traces to a committed JSON under
-> [`artifacts/`](artifacts/README.md). This one does not, and adding a
-> `mcreid-wildtrack footpoint` command is the highest-value gap to close, because
-> this is the measurement the whole failure analysis rests on.
+> **Reproducible since the audit, and partly confirmed.** `mcreid-wildtrack
+> footpoint` now recomputes both columns; artifacts under
+> [`artifacts/`](artifacts/README.md).
+>
+> **The GT column reproduces exactly** — mean 0.123 m, p90 0.207 m, 0 % beyond
+> the clustering radius, over 4804 camera pairs. The published 0.12 / 0.21 / 0 %
+> are confirmed to the digit.
+>
+> **The detector column does not reproduce at a single number**, because it turns
+> out to depend strongly on one methodological choice the original never
+> recorded: how permissively a detector box is attributed to an annotated person.
+> Re-measured over 40 frames × 7 cameras with `yolo11x` @ 1280:
+>
+> | IoU gate | mean | p50 | p90 | >0.35 m | >1.00 m | pairs |
+> |---|---|---|---|---|---|---|
+> | 0.1 | 2.17 m | 0.46 m | 5.79 m | 65 % | 26 % | 3354 |
+> | 0.3 | 1.14 m | 0.42 m | 2.57 m | 61 % | 19 % | 2951 |
+> | 0.5 | 0.62 m | 0.39 m | 1.02 m | 58 % | 11 % | 2054 |
+> | **published above** | **1.60 m** | **0.49 m** | **4.50 m** | **64 %** | **31 %** | — |
+>
+> The mechanism is now understood: a badly truncated box has *low* IoU with the
+> full GT box, so a strict gate discards exactly the cases that produce the
+> largest disagreement, and the statistic becomes "disagreement given that the
+> detector already produced a good box" — a narrower and much tamer quantity.
+> The published figures sit between the 0.1 and 0.3 rows, consistent with a
+> permissive attribution rule.
+>
+> **What is settled, at every threshold tried:** GT boxes agree to 0.12 m and
+> never exceed the clustering radius, while detector boxes disagree by
+> 0.39–0.46 m median with a heavy tail, and 58–65 % of pairs land beyond the
+> 0.35 m merge radius. The diagnosis — the box's bottom edge, not the
+> homography — holds throughout. The exact headline digits are pending a decision
+> on which attribution rule to standardise on, so they are left as published
+> rather than quietly restated.
 
 The homography is fine. The *input* to it is not: a detection box bottom edge is
 the ground-contact point only when the feet are visible, and in a crowd they are
