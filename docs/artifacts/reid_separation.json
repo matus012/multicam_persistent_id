@@ -1,0 +1,30 @@
+{
+  "imagenet_resnet18": {
+    "same_id_xcam_mean": 0.37660688969798517,
+    "diff_id_xcam_mean": 0.4090160148678453,
+    "separation": 0.03240912516986011,
+    "same_id_xcam_p50": 0.37359826755242764,
+    "same_id_xcam_p90": 0.496988770075718,
+    "diff_id_xcam_p05": 0.27160406320848346,
+    "diff_id_xcam_p10": 0.29904307127768714,
+    "n_same": 35597,
+    "n_diff": 1519230,
+    "best_gate": 0.38,
+    "best_gate_tpr": 0.5272916256987948,
+    "best_gate_fpr": 0.38203629470192135
+  },
+  "osnet_x1_0_msmt17": {
+    "same_id_xcam_mean": 0.524562249001398,
+    "diff_id_xcam_mean": 0.6226075281582367,
+    "separation": 0.0980452791568387,
+    "same_id_xcam_p50": 0.540775983905067,
+    "same_id_xcam_p90": 0.670307725287753,
+    "diff_id_xcam_p05": 0.4895486830655515,
+    "diff_id_xcam_p10": 0.5221227088689446,
+    "n_same": 35597,
+    "n_diff": 1519230,
+    "best_gate": 0.56,
+    "best_gate_tpr": 0.5635306346040396,
+    "best_gate_fpr": 0.19950962000487088
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "ok": true,
+  "what_this_validates": "the WILDTRACK -> calib.json converter, by cross-checking the dataset's ground-plane annotations against its per-view box annotations. It does NOT validate WILDTRACK's own calibration.",
+  "n_frames_sampled": 20,
+  "threshold_median_px": 25.0,
+  "cameras": [
+    {
+      "camera_id": "CVLab1",
+      "n_samples": 522,
+      "mean_px": 7.319635619654205,
+      "median_px": 5.685767577233773,
+      "p90_px": 12.058832369284097,
+      "max_px": 74.15495243484128,
+      "problems": []
+    },
+    {
+      "camera_id": "CVLab2",
+      "n_samples": 322,
+      "mean_px": 11.362282255172868,
+      "median_px": 7.728742308287253,
+      "p90_px": 25.064512093120825,
+      "max_px": 75.950935908002,
+      "problems": []
+    },
+    {
+      "camera_id": "CVLab3",
+      "n_samples": 419,
+      "mean_px": 13.363339344221671,
+      "median_px": 7.971333003149173,
+      "p90_px": 31.82218097706118,
+      "max_px": 127.19096444033352,
+      "problems": []
+    },
+    {
+      "camera_id": "CVLab4",
+      "n_samples": 171,
+      "mean_px": 17.721703574655788,
+      "median_px": 11.694015727509475,
+      "p90_px": 38.23814604063117,
+      "max_px": 123.46874137700577,
+      "problems": []
+    },
+    {
+      "camera_id": "IDIAP1",
+      "n_samples": 93,
+      "mean_px": 13.599066459426203,
+      "median_px": 11.053703857899547,
+      "p90_px": 21.970007013107033,
+      "max_px": 44.63615296347678,
+      "problems": []
+    },
+    {
+      "camera_id": "IDIAP2",
+      "n_samples": 555,
+      "mean_px": 4.338269917211134,
+      "median_px": 2.965910760041007,
+      "p90_px": 7.630332382904838,
+      "max_px": 51.16085283995318,
+      "problems": []
+    },
+    {
+      "camera_id": "IDIAP3",
+      "n_samples": 167,
+      "mean_px": 14.864645832331739,
+      "median_px": 15.277083811639304,
+      "p90_px": 24.62108020900176,
+      "max_px": 43.532350767204925,
+      "problems": []
+    }
+  ]
+}

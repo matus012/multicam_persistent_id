@@ -14,9 +14,11 @@ from pathlib import Path
 # Published MVDet numbers are deliberately NOT hardcoded here. Filling them in
 # from memory would put a fabricated benchmark figure next to real measurements,
 # which is worse than an obvious blank.
+# ASCII-only on purpose: this row is printed to a console whose codepage mangles
+# em-dashes on Windows, and the output is meant to be pasted into markdown.
 MVDET_ROW = (
-    "| MVDet (Hou et al., published) — **trained on WILDTRACK** "
-    "| _TODO: fill from paper_ | _TODO_ | _TODO_ | _TODO_ | n/a | n/a |"
+    "| MVDet (Hou et al., ECCV 2020) - **trained on WILDTRACK** "
+    "| deliberately not transcribed - see note | - | - | - | n/a | n/a |"
 )
 
 LABELS = {
