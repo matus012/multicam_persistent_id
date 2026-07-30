@@ -128,9 +128,13 @@ def test_intruder_during_the_gap_does_not_inherit_the_dormant_id(seed: int) -> N
 def test_hero_returns_under_its_original_id_even_with_an_intruder(seed: int) -> None:
     """The hero's first and last observed identity must be the same one.
 
-    A short-lived duplicate track can appear at the moment of reappearance (see
-    the known-transient note in status.txt), so this asserts the identity is
-    recovered, not that the path there is perfectly clean.
+    A short-lived duplicate track can appear at the moment of reappearance: the
+    returning person is confirmed by ONE camera first, which is too little
+    evidence for the strict dormant gate, so a candidate track is born; the
+    cleaner multi-camera cluster then resurrects the real ID a frame later and the
+    two coexist for ~4 frames until the duplicate merge fires. It self-heals, and
+    the intruder never inherits the identity. This test therefore asserts the
+    identity is recovered, not that the path there is perfectly clean.
     """
     scene = generate_scene(long_gap_scene(gap_s=75.0, seed=seed, intruder=True))
     report = run_toy_scene(scene).report

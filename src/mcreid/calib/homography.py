@@ -1,6 +1,6 @@
 """Ground-plane homography estimation: 4-point floor correspondences or AprilTags.
 
-Corner-order convention (LOCKED — mirrored in capture_guide.md):
+Corner-order convention (LOCKED — must match how the tags are physically laid out):
     A tag lies flat on the floor, print-side up. Its local frame is +x right,
     +y toward the top of the printed tag. ``yaw_deg`` rotates that local frame
     about world +Z. cv2.aruco returns corners as (TL, TR, BR, BL) in the tag's

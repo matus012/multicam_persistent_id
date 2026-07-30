@@ -42,8 +42,8 @@ def horizon_sign(H: FloatArray, image_size: tuple[int, int]) -> float:  # noqa: 
     """Sign of the homogeneous scale on the *visible floor* side of the horizon.
 
     Reference pixel is the bottom-centre of the image: for any camera mounted
-    above the floor and looking at it (the only mount this project supports —
-    see capture_guide.md), that pixel images floor in front of the camera.
+    above the floor and tilted down at it — the only mount this project supports —
+    that pixel images floor in front of the camera.
     """
     width, height = image_size
     ref = np.array([width / 2.0, height - 1.0, 1.0], dtype=np.float64)

@@ -444,8 +444,9 @@ def bedroom_rig(
 ) -> tuple[VirtualCamera, ...]:
     """Four cameras in the corners of a ``room`` metre rectangle, all looking in.
 
-    Mirrors the mount plan in capture_guide.md so the toy sequence and the real
-    cardboard shoot exercise the same geometry.
+    Mirrors the mount plan specified for the real cardboard shoot — corner mounts
+    at 2.2 m, tilted down ~28 degrees — so the toy sequence and the real capture
+    exercise the same geometry.
     """
     width, depth = room
     return (

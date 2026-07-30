@@ -198,7 +198,15 @@ class DormantConfig:
     by their mutual distance fuses two genuinely different people 40.5% of the
     times it fires, and trusting a near-miss to say *which* identity a later
     ambiguous probe belongs to points at the wrong person 45% of the time even in
-    a two-entry gallery. See status.txt, session 3g."""
+    a two-entry gallery.
+
+    Provenance of those two rates: measured during development on real WILDTRACK
+    crops with the shipped OSNet weights, over ~2000 simulated leave/return
+    cascades. The harness was exploratory and is NOT in this repository, so the
+    percentages are not reproducible from a clone — treat them as the recorded
+    reason these mechanisms are off, not as a citable result. What IS reproducible
+    is the behaviour they justify: see ``tests/test_fusion_dormant.py``, which
+    pins the refusal and the deadlock it causes."""
     min_hits: int = 10
     """Only identities with this much accumulated evidence are worth storing;
     below it, a demotion would be preserving a false positive."""

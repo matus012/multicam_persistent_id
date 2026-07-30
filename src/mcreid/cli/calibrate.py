@@ -1,6 +1,6 @@
 """`mcreid-calibrate` — build a rig calib.json from checkerboard + AprilTag captures.
 
-Expected capture layout (see capture_guide.md):
+Expected capture layout:
 
     footage/calib/
         cam0/intrinsics/*.jpg     checkerboard frames, >= 8 usable views
