@@ -79,8 +79,13 @@ class IdConsistencyReport:
 
     def summary(self) -> str:
         lines = [
+            # NOT a count of people. This is the mint counter: it includes every
+            # TENTATIVE track the lifecycle deletes a few frames later, so a single
+            # spurious detection bumps it. The same line in `mcreid-live` was
+            # already relabelled for exactly this reason — reported as "15 global
+            # IDs issued" with one person in frame. Name it for what it is.
             f"frames={self.n_frames}  gt_agents={self.n_gt_agents}  "
-            f"global_ids_issued={self.n_ids_issued}",
+            f"ids_minted_incl_tentative={self.n_ids_issued}",
             f"ID switches: {self.total_id_switches} {dict(self.id_switches)}",
             f"position RMSE: {self.position_rmse_m:.3f} m  "
             f"(mean {self.mean_position_error_m:.3f} m)",

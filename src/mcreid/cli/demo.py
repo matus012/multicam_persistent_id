@@ -193,7 +193,15 @@ def synthetic(
             (e.n_frames for e in config.occlusions if e.camera_ids is None), default=0
         )
         checks = {
-            "zero ID switches": (report.total_id_switches == 0, report.total_id_switches),
+            # Scene-wide on purpose, so a switch on the DISTRACTOR fails the gate
+            # too. On the default seed that is exactly what happens: the hero is
+            # clean and the distractor takes one. Scoping this to the hero would
+            # make the gate easier to pass by ignoring the second person the scene
+            # was deliberately given.
+            "zero ID switches (scene-wide, incl. distractor)": (
+                report.total_id_switches == 0,
+                report.total_id_switches,
+            ),
             "ID held across blackout": (
                 report.longest_blackout_id_held.get(1, 0) >= blackout_frames,
                 report.longest_blackout_id_held.get(1, 0),
