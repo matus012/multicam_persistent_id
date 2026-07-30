@@ -42,7 +42,13 @@ htmlcov/
 *.avi
 *.mkv
 *.gif
-!docs/assets/*.gif
+# Whitelist ONE vetted asset by exact name, not a directory glob. The previous
+# `!docs/assets/*.gif` let a 5.9 MB animation of real WILDTRACK frames into
+# history — the dataset this repo promises never to commit (see
+# scripts/download_wildtrack.py). The rule is about the pixels, not the
+# extension: anything rendered from third-party or room footage stays out, and
+# a new asset here needs a deliberate line of its own.
+!docs/assets/cardboard_demo.gif
 
 # --- calibration produced from my room (personal) ---
 /calib/
@@ -56,6 +62,15 @@ htmlcov/
 # Calibration reports embed frames of my room — same class as footage.
 /reports/
 *.log
+
+# --- internal working logs (local only, deliberately untracked) ---
+# These are session notes, not documentation. They describe the room, the rig
+# and the hardware they were recorded on, and they were rewritten out of history
+# rather than merely untracked. Keep editing them locally; they are the project's
+# memory and the session protocol still depends on them.
+/status.txt
+/context.md
+/capture_guide.md
 
 # --- editors / OS ---
 .vscode/
