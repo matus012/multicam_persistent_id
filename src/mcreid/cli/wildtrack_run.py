@@ -1,8 +1,10 @@
 """`mcreid-wildtrack` — run the full pipeline on real WILDTRACK footage.
 
-Three commands, meant to be run in this order:
+Commands, meant to be run in this order:
 
     calib-report   cross-check the WILDTRACK -> calib.json converter
+    footpoint      measure GT-box vs detector-box ground disagreement; this is
+                   the root-cause measurement the whole stress test rests on
     run            per-view detection + tracking + fusion over a clip, with
                    annotated per-camera video and a BEV, plus honest metrics
     (mcreid-eval)  the MODA/MODP protocol row for G-M1-3
@@ -24,6 +26,14 @@ import numpy as np
 import numpy.typing as npt
 import typer
 
+from mcreid.eval.footpoint import (
+    CLUSTER_RADIUS_M,
+    MERGE_RADIUS_M,
+    ground_points_per_camera,
+    match_detections_to_gt,
+    pairwise_disagreements,
+    summarize,
+)
 from mcreid.eval.id_metrics import evaluate_id_consistency
 from mcreid.eval.wildtrack import compute_moda_modp, load_annotations, load_rig
 from mcreid.eval.wildtrack_report import check_conversion
@@ -152,6 +162,165 @@ def calib_report(
     )
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+@app.command("footpoint")
+def footpoint(
+    root: Path = typer.Option(Path("data/wildtrack_full"), help="WILDTRACK root."),
+    out: Path = typer.Option(
+        Path("reports/wildtrack/footpoint.json"), help="Where to write the summary JSON."
+    ),
+    n_frames: int = typer.Option(40, help="Annotated frames to sample."),
+    start: int = typer.Option(0, help="First frame slot."),
+    weights: Path = typer.Option(Path("weights/yolo11x.pt"), help="Detector weights."),
+    imgsz: int = typer.Option(1280, help="Detector input size."),
+    conf: float = typer.Option(0.25, help="Detector confidence threshold."),
+    iou_threshold: float = typer.Option(
+        0.5, help="IoU required to attribute a detector box to an annotated person."
+    ),
+    seed: int = typer.Option(DEFAULT_SEED, help="RNG seed."),
+    log_level: str = typer.Option("INFO"),
+) -> None:
+    """Measure why crowded multi-view fusion breaks: GT boxes vs detector boxes.
+
+    Projects the same annotated person's foot point to the ground from every
+    camera that sees them, and reports how far the independent estimates disagree
+    — once from WILDTRACK's ground-truth boxes, once from detector boxes matched
+    to those same people. Identical homography, foot-point rule and undistortion
+    in both arms, so the difference is attributable to the boxes alone.
+
+    Needs the dataset and the perception extras; there is no way to measure a
+    detector's boxes without running the detector.
+    """
+    setup_logging(log_level)
+    seed_everything(seed)
+    if not root.is_dir():
+        raise typer.BadParameter(
+            f"{root} not found. Run: python scripts/download_wildtrack.py fetch"
+        )
+
+    rig = load_rig(root / "calibrations")
+    cameras = {cam.camera_id: cam for cam in rig.cameras}
+    annotations = load_annotations(root / "annotations_positions", camera_ids=rig.camera_ids)
+    per_camera_paths = [_frame_paths(root, i) for i in range(len(rig.cameras))]
+    available = min(len(paths) for paths in per_camera_paths)
+    n_frames = min(n_frames, available - start)
+    if n_frames <= 0:
+        raise typer.BadParameter(f"no frames available from index {start} (have {available})")
+
+    backends = {
+        cam.camera_id: GpuPerViewBackend(
+            cam.camera_id, GpuViewConfig(weights=weights, imgsz=imgsz, conf_threshold=conf)
+        )
+        for cam in rig.cameras
+    }
+
+    gt_distances: list[float] = []
+    det_distances: list[float] = []
+    n_people_gt = 0
+    n_people_det = 0
+    n_gt_boxes = 0
+    n_matched_boxes = 0
+
+    typer.echo(f"measuring {n_frames} frames x {len(rig.cameras)} cameras ...")
+    for offset in range(n_frames):
+        slot = start + offset
+        index = _frame_number(per_camera_paths[0][slot])
+        people = annotations.get(index)
+        if not people:
+            continue
+
+        # Detector boxes attributed to annotated people, per camera.
+        det_by_person: dict[int, dict[str, FloatArray]] = {}
+        for cam_index, cam in enumerate(rig.cameras):
+            gt_indices = [
+                i for i, p in enumerate(people) if p.bboxes.get(cam.camera_id) is not None
+            ]
+            if not gt_indices:
+                continue
+            gt_boxes = np.asarray(
+                [people[i].bboxes[cam.camera_id] for i in gt_indices], dtype=np.float64
+            )
+            raw = cv2.imread(str(per_camera_paths[cam_index][slot]), cv2.IMREAD_COLOR)
+            if raw is None:
+                raise OSError(f"could not read {per_camera_paths[cam_index][slot]}")
+            det_boxes, _ = backends[cam.camera_id].detect(np.asarray(raw, dtype=np.uint8))
+
+            n_gt_boxes += len(gt_indices)
+            for local_gt, local_det in match_detections_to_gt(
+                gt_boxes, det_boxes, iou_threshold=iou_threshold
+            ).items():
+                person_id = people[gt_indices[local_gt]].person_id
+                det_by_person.setdefault(person_id, {})[cam.camera_id] = np.asarray(
+                    det_boxes[local_det], dtype=np.float64
+                )
+                n_matched_boxes += 1
+
+        for person in people:
+            gt_boxes_by_cam = {
+                cam_id: box for cam_id, box in person.bboxes.items() if box is not None
+            }
+            gt_pairs = pairwise_disagreements(
+                ground_points_per_camera(gt_boxes_by_cam, cameras)
+            )
+            if gt_pairs:
+                gt_distances.extend(gt_pairs)
+                n_people_gt += 1
+
+            det_pairs = pairwise_disagreements(
+                ground_points_per_camera(det_by_person.get(person.person_id, {}), cameras)
+            )
+            if det_pairs:
+                det_distances.extend(det_pairs)
+                n_people_det += 1
+
+        if (offset + 1) % 10 == 0:
+            typer.echo(f"  {offset + 1}/{n_frames} frames")
+
+    gt_stats = summarize(gt_distances)
+    det_stats = summarize(det_distances)
+
+    summary: dict[str, Any] = {
+        "what_this_measures": (
+            "same-person cross-camera ground-position disagreement, from GT boxes vs "
+            "detector boxes. Identical homography, foot-point rule and undistortion in "
+            "both arms; only the box source differs."
+        ),
+        "frames_sampled": n_frames,
+        "start_frame_slot": start,
+        "cameras": len(rig.cameras),
+        "detector": {"weights": str(weights), "imgsz": imgsz, "conf": conf},
+        "iou_threshold": iou_threshold,
+        "seed": seed,
+        "gt_boxes_seen": n_gt_boxes,
+        "detector_boxes_attributed": n_matched_boxes,
+        "people_with_multiview_gt": n_people_gt,
+        "people_with_multiview_detections": n_people_det,
+        "gt_boxes": gt_stats.as_dict(),
+        "detector_boxes": det_stats.as_dict(),
+    }
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    typer.echo("\n| same person, two cameras | GT boxes | detector boxes |")
+    typer.echo("|---|---|---|")
+    typer.echo(f"| mean disagreement | {gt_stats.mean_m:.2f} m | {det_stats.mean_m:.2f} m |")
+    typer.echo(f"| p50 | {gt_stats.p50_m:.2f} m | {det_stats.p50_m:.2f} m |")
+    typer.echo(f"| p90 | {gt_stats.p90_m:.2f} m | {det_stats.p90_m:.2f} m |")
+    typer.echo(
+        f"| beyond {MERGE_RADIUS_M:.2f} m | {gt_stats.frac_beyond_merge_radius * 100:.0f} % "
+        f"| {det_stats.frac_beyond_merge_radius * 100:.0f} % |"
+    )
+    typer.echo(
+        f"| beyond {CLUSTER_RADIUS_M:.2f} m (clustering radius) "
+        f"| {gt_stats.frac_beyond_cluster_radius * 100:.0f} % "
+        f"| {det_stats.frac_beyond_cluster_radius * 100:.0f} % |"
+    )
+    typer.echo(
+        f"\npairs: {gt_stats.n_pairs} GT, {det_stats.n_pairs} detector. "
+        f"wrote {out}"
+    )
 
 
 @app.command()
