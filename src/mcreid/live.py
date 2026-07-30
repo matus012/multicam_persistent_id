@@ -29,6 +29,7 @@ import numpy as np
 import numpy.typing as npt
 
 from mcreid.calib.schema import CameraCalib, GroundPlane, Intrinsics, RigCalib
+from mcreid.diagnostics.shadow import ShadowProbe
 from mcreid.fusion.global_id import FusionConfig, GlobalIDManager
 from mcreid.fusion.types import GlobalTrackSnapshot, TrackState, ViewObservation
 from mcreid.utils.logging import get_logger
@@ -177,6 +178,7 @@ class LiveSession:
         metric: bool,
         config: LiveConfig | None = None,
         fusion_config: FusionConfig | None = None,
+        shadow: ShadowProbe | None = None,
     ) -> None:
         self.backend = backend
         self.config = config or LiveConfig()
@@ -184,6 +186,8 @@ class LiveSession:
         """True only when a real homography was supplied; gates the BEV panel."""
         self.rig = RigCalib(cameras=[calibration], world_notes="single live camera")
         self.manager = GlobalIDManager(self.rig, fusion_config)
+        self.shadow = shadow
+        """Optional measurement-only recorder. None on every normal run."""
         self.timeline = IdentityTimeline()
         self.frame_index = -1
         self._fps = deque[float](maxlen=30)
@@ -250,6 +254,8 @@ class LiveSession:
 
         observations = self.backend.step(frame, self.frame_index)
         snapshots = self.manager.step(observations, self.frame_index, dt)
+        if self.shadow is not None:
+            self.shadow.observe(self.manager, self.frame_index, now)
         assignment = self.manager.last_assignment
         for snap in snapshots:
             if snap.state is not TrackState.COASTING:

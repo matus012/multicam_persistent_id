@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 import typer
 
+from mcreid.diagnostics.shadow import ShadowProbe, summarise
 from mcreid.fusion.dormant import DormantConfig
 from mcreid.fusion.global_id import FusionConfig
 from mcreid.live import (
@@ -85,6 +86,17 @@ def run(
             "the recall it buys. Use it for the sit/leave/return acceptance run."
         ),
     ),
+    shadow_probe: Path = typer.Option(
+        None,
+        help=(
+            "DIAGNOSTIC. Write a per-frame dormant-distance record to this path "
+            "(.jsonl + .csv). Measures the appearance distance to every retired "
+            "identity on every frame without acting on it, so one return yields a "
+            "full d(t) curve instead of a single probe. Tracking behaviour is "
+            "unchanged: resurrection still happens normally and the recorder only "
+            "reads. Omit for normal runs."
+        ),
+    ),
     clip_seconds: float = typer.Option(8.0, help="Length of the save-clip buffer."),
     out_dir: Path = typer.Option(Path("reports"), help="Where 's' saves clips."),
     max_frames: int = typer.Option(0, help="Stop after N frames (0 = until 'q')."),
@@ -146,12 +158,22 @@ def run(
                 "rival record. Only valid if nobody else appears in frame."
             )
 
+    dormant_cfg = (fusion_config or FusionConfig()).dormant
+    shadow = (
+        ShadowProbe(shadow_probe, gate=dormant_cfg.appearance_distance, top_k=dormant_cfg.top_k)
+        if shadow_probe is not None
+        else None
+    )
+    if shadow is not None:
+        typer.echo(f"shadow probe ON (diagnostic): recording to {shadow_probe}.jsonl/.csv")
+
     session = LiveSession(
         backend=backend,
         calibration=calibration,
         metric=metric,
         config=LiveConfig(span_m=span_m, clip_seconds=clip_seconds),
         fusion_config=fusion_config,
+        shadow=shadow,
     )
 
     typer.echo("running — 'q' to quit, 's' to save a clip")
@@ -244,6 +266,12 @@ def run(
     # exactly like nobody having returned. Print what the gate actually saw.
     for line in session.manager.dormant.probe_report():
         typer.echo(line)
+    if session.shadow is not None:
+        jsonl, csv_path = session.shadow.write()
+        for line in summarise(session.shadow.rows, session.shadow.gate):
+            typer.echo(line)
+        typer.echo(f"shadow record: {jsonl}  and  {csv_path}")
+
     if session.manager.dormant.n_suppressed_duplicates:
         typer.echo(
             f"{session.manager.dormant.n_suppressed_duplicates} identity/identities "

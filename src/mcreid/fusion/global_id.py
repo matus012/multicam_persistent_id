@@ -480,6 +480,8 @@ class GlobalIDManager:
         self._frame = -1
         self._last_dt = 1.0 / 30.0
         self.last_assignment: dict[tuple[str, int], int] = {}
+        self.last_ground: list[GroundObservation] = []
+        """This frame's projected observations. Diagnostics only — see step()."""
         """(camera_id, local_track_id) -> global_id for the most recent frame.
         The overlay needs this to label each per-view box with the *global* ID,
         which is the whole claim the demo makes."""
@@ -564,6 +566,9 @@ class GlobalIDManager:
             track.predict(self.kf, dt)
 
         ground = self.project_observations(views, frame)
+        # Kept for diagnostics only (mcreid.diagnostics.shadow). Nothing in the
+        # tracking path reads it; it is the already-computed list, not a copy.
+        self.last_ground = ground
         matched: dict[int, list[GroundObservation]] = {}
         leftovers: list[GroundObservation] = []
         self.last_assignment = {}
