@@ -37,12 +37,23 @@ one agent alone "zero ID switches" is achievable by any tracker that never mints
 a second identity — a stateless 25-line stub passed an earlier version of this
 gate, so the scene composition is now asserted by a test.
 
-| scenario | result |
+Seeds 1, 7, 42, 123, 2024. Reproduce any row with
+`uv run mcreid-demo synthetic --scenario cardboard --seed <s>`, or all of it with
+`uv run pytest tests/test_pipeline_integration.py tests/test_pipeline_long_gap.py`.
+
+| measurement | result |
 |---|---|
-| cardboard, 2.5 s total occlusion from all four cameras | hero holds its ID on **4/5 seeds**; ≤1 switch on any seed |
-| BEV dot alive through the blackout | **75/75 frames, all seeds** |
-| long-gap re-ID (75 s absence, distractor present throughout) | **0 switches**, identity recovered on all seeds |
-| adversarial long-gap (a stranger present only during the absence) | stranger **never** inherits the dormant identity |
+| hero keeps its ID through the 2.5 s four-camera blackout | **4/5 seeds** — fails on seed 1 |
+| hero ID switches across the whole clip | **0 on 2/5 seeds, 1 on the other 3** |
+| BEV dot alive through the blackout | **75/75 frames, all 5 seeds** |
+| scene-wide switches (hero + distractor + false positive) | 1 on four seeds, **3 on seed 1** |
+| long-gap re-ID, 75 s absence, distractor present throughout | identity **recovered under its original ID** on all seeds |
+| adversarial long-gap, stranger present only during the absence | stranger **never** inherits the dormant identity |
+
+The last two rows assert *recovery*, not a clean path: a duplicate track can exist
+for ~4 frames at the instant of reappearance, because the returning person is
+confirmed by one camera before the multi-camera cluster resurrects the real ID.
+It self-heals via the duplicate merge and costs counted switches while it lasts.
 
 The appearance model in this generator is **fitted to the operating point
 measured on real WILDTRACK crops**, not to published ReID numbers. Published
@@ -53,12 +64,23 @@ former perfect score, which is the point — see [Limitations](#limitations).
 
 ### Calibration
 
-| quantity | result |
-|---|---|
-| focal length error (synthetic capture) | < 0.4 % |
-| ground homography residual | 0.1 cm |
-| image → world floor position error | 4–16 mm mean |
-| WILDTRACK converter cross-check vs dataset GT | 3–15 px median per camera |
+| quantity | bound enforced by the suite | reproduce |
+|---|---|---|
+| intrinsics recovery from a synthetic checkerboard | fx, fy, cx, cy within **2 %** of truth; reprojection RMS **< 0.5 px** | `pytest tests/test_calib_intrinsics.py` |
+| ground homography, exact 4-point fit | residual **< 1e-9** | `pytest tests/test_calib_homography.py` |
+| ground homography, RANSAC fit under noise | RMS **< 0.05 px** | same |
+| image → world round-trip on the ground plane | RMS error **< 1e-6 m** | same |
+| WILDTRACK converter cross-check vs dataset GT | **2.97–15.3 px median** per camera, 2249 samples | `mcreid-wildtrack calib-report` |
+
+The first four are the tolerances the tests actually assert, which is what a
+clone can verify. A one-off synthetic capture measured tighter than these
+(sub-0.4 % focal error, 0.1 cm homography residual, 4–16 mm floor error), but
+that run's artifact is not in the repository, so the looser test-enforced bounds
+are what is claimed here. The WILDTRACK row is backed by a committed artifact:
+[`docs/artifacts/wildtrack_calib_summary.json`](docs/artifacts/wildtrack_calib_summary.json).
+Note what it validates — *our converter*, by cross-checking WILDTRACK's
+ground-plane annotations against its per-view boxes. It does not validate
+WILDTRACK's own calibration.
 
 ---
 
@@ -113,11 +135,20 @@ result, because the broken part is the input geometry, not the matcher.
 |---|---|---|---|---|---|---|
 | geometric fusion + ImageNet trunk (no ReID) | −118.7 % | 64.2 % | 26.9 % | 69.3 % | 741 | 1000 |
 | geometric fusion + off-the-shelf ReID (zero training by us) | −118.8 % | 64.1 % | 26.9 % | 69.4 % | **636** | **943** |
-| MVDet (Hou et al.) — **trained on WILDTRACK** | _TODO: fill from paper_ | _TODO_ | _TODO_ | _TODO_ | n/a | n/a |
+| MVDet (Hou et al., ECCV 2020) — **trained on WILDTRACK** | deliberately not transcribed — see note | — | — | — | n/a | n/a |
 
 400 frames, 7 cameras, 313 ground-truth identities. Position RMSE 0.29 m for
 both. Runtime 7.7 FPS/camera, 1.10 FPS aggregate at 7×1080p on an RTX 4060
 Laptop (9.7 / 1.38 for the lighter ImageNet trunk).
+
+Every figure in this section is checkable without downloading the dataset: the
+raw run summaries are committed under
+[`docs/artifacts/`](docs/artifacts/README.md), and the table above regenerates
+from them:
+
+```bash
+python scripts/make_results_table.py docs/artifacts/wildtrack_eval_imagenet.json docs/artifacts/wildtrack_eval_osnet.json
+```
 
 MODA charges every false positive against the ground-truth count, so the
 duplicate detections above put it deeply negative: 17910 false positives against
@@ -194,6 +225,19 @@ Run the whole pipeline on a scripted scene — no footage, no GPU, no dataset:
 ```bash
 uv run mcreid-demo synthetic --scenario cardboard
 ```
+
+> **Expect this to print `cardboard criterion: FAIL (1 of 5)` and exit 1.** That is
+> the honest current bar, not a broken install. On the default seed the hero holds
+> its identity through the whole 2.5 s four-camera blackout and the BEV dot never
+> drops a frame — but the *distractor* takes one ID switch, and the gate is
+> scene-wide, so one switch anywhere fails it. The four other criteria pass. The
+> gate was deliberately left strict rather than rescoped to the hero, because an
+> earlier, laxer version of it was passed by a 25-line stateless stub with no ReID,
+> no Kalman filter and no lifecycle at all. Seeds 7 and 42 are the two of five with
+> a clean hero; see [Results](#results) for the full distribution and
+> [Limitations](#limitations) for why the perfect score is gone.
+
+It writes `outputs/demo/cardboard.mp4` and `.gif`.
 
 Install the perception stack (CUDA 12.6) for anything involving real video:
 
@@ -350,6 +394,34 @@ src/mcreid/
 ```
 
 - [docs/wildtrack_results.md](docs/wildtrack_results.md) — real-footage validation
+
+## Credit where it is due
+
+This project trains nothing. Everything that does the perceptual work is someone
+else's, and the parts worth naming are:
+
+- **OSNet** — Zhou, Yang, Cavallaro, Xiang, *Omni-Scale Feature Learning for
+  Person Re-Identification*, ICCV 2019. Architecture vendored from
+  [Torchreid](https://github.com/KaiyangZhou/deep-person-reid) (MIT); the
+  `osnet_x1_0` MSMT17 weights are the authors'.
+- **YOLO11** — [Ultralytics](https://github.com/ultralytics/ultralytics), AGPL-3.0.
+  Detection only; COCO-pretrained, `yolo11s` by default and `yolo11x` for accuracy.
+- **WILDTRACK** — Chavdarova et al., *WILDTRACK: A Multi-camera HD Dataset for
+  Dense Unscripted Pedestrian Detection*, CVPR 2018. EPFL CVLab. Used as a stress
+  test under the dataset's own terms; not redistributed.
+- **MVDet** — Hou, Zheng, Gould, *Multiview Detection with Feature Perspective
+  Transformation*, ECCV 2020. Referenced as the trained-fusion point of comparison
+  and as the design this project's v2 direction would follow.
+- **MODA / MODP** — the CLEAR multi-object detection metrics
+  (Kasturi et al., 2009), as used by the WILDTRACK protocol.
+
+**No third-party tracker is used anywhere.** Ultralytics provides detection only;
+its built-in BoT-SORT/ByteTrack are deliberately *not* delegated to, because they
+do not expose a stable per-tracklet appearance vector (see
+`src/mcreid/track/gpu_view.py`). Both the CPU and GPU per-view paths run this
+repository's own `PerViewTracker`, and cross-camera association is its own
+per-camera Hungarian on Mahalanobis ground distance blended with ReID cosine,
+plus a ground-plane Kalman filter and the three-stage recovery ladder above.
 
 ## Licence
 
