@@ -340,10 +340,14 @@ re-measure when it fails.
   time (0.12 m with clean boxes, 1.60 m mean with detector boxes). This is the
   single biggest open problem in the project, and it is a *geometry* problem —
   a better appearance model does not touch it.
-- **Runtime is not real-time at 7×1080p.** Measured on an RTX 4060 Laptop: 7.7
-  FPS per camera, 1.10 FPS aggregate across seven 1080p streams. No target is
-  claimed for that load. Detection dominates — per-view tracking plus fusion
-  costs 1–2 ms/frame, so essentially the whole budget is the detector.
+- **Runtime is not real-time at 7×1080p.** 7.7 FPS per camera, 1.10 FPS aggregate
+  across seven 1080p streams — from
+  [`docs/artifacts/wildtrack_eval_osnet.json`](docs/artifacts/wildtrack_eval_osnet.json),
+  on an RTX 4060 Laptop. No target is claimed for that load. Detection dominates:
+  per-view tracking plus fusion measured 1–2 ms/frame, so essentially the whole
+  budget is the detector. That last figure is a development measurement on the
+  same machine with no artifact in this repo and no benchmark in the suite —
+  treat the ratio as indicative, not as a result.
 - **"Zero training" means zero training *by us*.** The detector and the ReID
   model are both pretrained on public data. Neither has seen the evaluation
   data, so the evaluation is zero-shot, but this is not a from-scratch system
