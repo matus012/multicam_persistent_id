@@ -107,48 +107,51 @@ write-up: [docs/wildtrack_results.md](docs/wildtrack_results.md).
 
 ### The cause: a bounding box's bottom edge is not a foot
 
-This is the finding, and it is upstream of everything else. The same person's
-ground position, computed independently from two cameras:
+**Ground-truth boxes put the same person within 0.12 m from any two cameras and
+never beyond the merge radius. Detector boxes put 58–65 % of those same pairs
+*past* it, with a heavy tail — at every attribution threshold tested. The broken
+input is the box's bottom edge, not the homography.**
 
-| | ground-truth boxes | **detector boxes** |
-|---|---|---|
-| mean disagreement | 0.12 m | **1.60 m** |
-| p90 | 0.21 m | **4.50 m** |
-| beyond the 1.0 m clustering radius | 0 % | **31 %** |
+That sentence is the finding, and it is upstream of everything else. Reproduce it:
 
-> **Provenance, stated plainly.** Reproduce both columns yourself:
->
-> ```bash
-> uv run mcreid-wildtrack footpoint --root data/wildtrack_full --n-frames 40
-> ```
->
-> The **GT column is confirmed to the digit** — 0.123 m mean, 0.207 m p90, 0 %
-> beyond the radius, over 4804 camera pairs.
->
-> The **detector column is confirmed in magnitude but not in its exact digits**,
-> because it depends on how permissively a detector box is attributed to an
-> annotated person — a choice the original measurement did not record. Re-measured,
-> the mean ranges 0.62 m → 2.17 m as that gate loosens from IoU 0.5 to 0.1, and the
-> figures above sit inside that range. A strict gate throws away the badly
-> truncated boxes that cause the worst disagreement, which is why it flatters the
-> result. The full sweep and the reasoning are in
-> [`docs/wildtrack_results.md`](docs/wildtrack_results.md); artifacts in
-> [`docs/artifacts/`](docs/artifacts/README.md).
->
-> **What holds at every threshold tried:** GT boxes agree to 0.12 m and never
-> exceed the clustering radius; detector boxes disagree by 0.39–0.46 m median with
-> a heavy tail, and 58–65 % of pairs exceed the 0.35 m merge radius. The
-> diagnosis — the box's bottom edge, not the homography — is not in question. The
-> headline digits are left exactly as first published rather than quietly
-> restated, pending a decision on which attribution rule to standardise on.
+```bash
+uv run mcreid-wildtrack footpoint --root data/wildtrack_full --n-frames 40 --iou-threshold 0.1
+```
+
+The same person's ground position, computed independently from two cameras, over
+40 frames × 7 cameras with `yolo11x` @ 1280. The detector arm is reported as a
+**sweep rather than a single number**, because it depends on how permissively a
+detector box is attributed to an annotated person, and no single choice of that is
+privileged:
+
+| | GT boxes | detector, IoU 0.1 | detector, IoU 0.3 | detector, IoU 0.5 |
+|---|---|---|---|---|
+| mean disagreement | **0.12 m** | 2.17 m | 1.14 m | 0.62 m |
+| p50 | 0.12 m | 0.46 m | 0.42 m | 0.39 m |
+| p90 | **0.21 m** | 5.79 m | 2.57 m | 1.02 m |
+| beyond 0.35 m (merge radius) | **0 %** | 65 % | 61 % | 58 % |
+| beyond 1.00 m (clustering radius) | **0 %** | 26 % | 19 % | 11 % |
+| pairs | 4804 | 3354 | 2951 | 2054 |
+
+**Why the detector column moves so much, and why the strict gate is the
+misleading one:** a badly truncated box has *low* IoU with the full ground-truth
+box. So raising the attribution threshold discards precisely the cases that
+produce the largest disagreement, and the statistic quietly stops meaning "how
+far apart do the cameras put this person" and starts meaning "…given that the
+detector already produced a good box". The IoU 0.1 column is the one that
+includes the occluded people this section is about.
+
+Artifacts for all three columns are committed:
+[`docs/artifacts/`](docs/artifacts/README.md). Full discussion:
+[`docs/wildtrack_results.md`](docs/wildtrack_results.md).
 
 The projection maths is sound — given clean boxes, the cameras agree to 12 cm.
 But the bottom edge of a detection box is the ground-contact point only when the
-feet are visible, and in a crowd they are routinely occluded, so the box
-truncates at whoever is standing in front. A third of the same person's
-detections therefore land more than a metre apart, and **no clustering radius can
-group them**. The system consequently emits ~2.5× more ground-plane detections
-than there are people.
+feet are visible, and in a crowd they are routinely occluded, so the box truncates
+at whoever is standing in front. A quarter of the same person's detection pairs
+land more than a metre apart, and **no clustering radius can group them**. The
+system consequently emits ~2.5× more ground-plane detections than there are
+people.
 
 Everything downstream inherits this. Appearance thresholds, association cost
 weights and a geometry-only merge were each swept and measured; none moved the
@@ -372,12 +375,12 @@ re-measure when it fails.
   threshold were swept with no effect. **Real four-camera footage has not been
   captured yet**, so no real-world number exists for this scenario at all.
 - **Crowds break precision.** On WILDTRACK the tracker emits ~2.5× more
-  ground-plane detections than there are people, giving a strongly negative
-  MODA. The cause is measured, not guessed: occlusion-truncated detection boxes
-  put the same person more than a metre apart between cameras a third of the
-  time (0.12 m with clean boxes, 1.60 m mean with detector boxes). This is the
-  single biggest open problem in the project, and it is a *geometry* problem —
-  a better appearance model does not touch it.
+  ground-plane detections than there are people, giving a strongly negative MODA.
+  The cause is measured, not guessed: clean boxes put the same person within
+  0.12 m between cameras and never past the merge radius, while occlusion-truncated
+  detector boxes push 58–65 % of those pairs past it and up to 26 % past a full
+  metre. This is the single biggest open problem in the project, and it is a
+  *geometry* problem — a better appearance model does not touch it.
 - **Runtime is not real-time at 7×1080p.** 7.7 FPS per camera, 1.10 FPS aggregate
   across seven 1080p streams — from
   [`docs/artifacts/wildtrack_eval_osnet.json`](docs/artifacts/wildtrack_eval_osnet.json),

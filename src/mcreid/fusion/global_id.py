@@ -111,11 +111,14 @@ class FusionConfig:
     The reasoning was sound: two different people cannot occupy the same 35 cm of
     floor, so within that radius appearance carries no information. It does not
     help, because the premise is wrong about where the duplicates actually are.
-    Measured on WILDTRACK, the cross-camera disagreement for one person is 0.12 m
-    using ground-truth boxes but **1.60 m mean / 4.50 m p90 using detector
-    boxes** — 64% of duplicate pairs sit beyond 0.35 m and 37% beyond the merge
-    radius entirely. At 0.35 m this fired rarely: MODA moved -1.188 -> -1.168
-    while ID switches got worse (636 -> 680).
+    Measured on WILDTRACK with ``mcreid-wildtrack footpoint``: the cross-camera
+    disagreement for one person is 0.12 m using ground-truth boxes, and 0 % of
+    those pairs sit beyond this 0.35 m radius. Using **detector** boxes,
+    **58-65 % of pairs sit beyond it** — the range spans the box-attribution
+    threshold, because a truncated box has low IoU with the true box and a strict
+    gate hides exactly the cases that miss. So the duplicates this option is meant
+    to collapse are mostly not inside 0.35 m to begin with. At 0.35 m it fired
+    rarely: MODA moved -1.188 -> -1.168 while ID switches got worse (636 -> 680).
 
     Kept because it is correct for well-localised inputs (it is a real effect on
     the synthetic scenes and would matter on a small room with unoccluded feet),

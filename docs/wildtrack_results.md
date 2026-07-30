@@ -180,53 +180,58 @@ detections rather than by identity confusion.
 
 ### Root cause of the duplicates — the decisive measurement
 
-| same person, two cameras | GT boxes | detector boxes |
-|---|---|---|
-| mean disagreement | 0.12 m | **1.60 m** |
-| p50 | — | 0.49 m |
-| p90 | 0.21 m | **4.50 m** |
-| beyond 0.35 m | — | 64 % |
-| beyond 1.00 m (clustering radius) | 0 % | **31 %** |
+**Ground-truth boxes place the same person within 0.12 m from any two cameras and
+never beyond the 0.35 m merge radius. Detector boxes place 58–65 % of those same
+pairs past it, with a heavy tail — at every attribution threshold tested. The
+broken input is the box's bottom edge, not the homography.**
 
-> **Reproducible since the audit, and partly confirmed.** `mcreid-wildtrack
-> footpoint` now recomputes both columns; artifacts under
-> [`artifacts/`](artifacts/README.md).
->
-> **The GT column reproduces exactly** — mean 0.123 m, p90 0.207 m, 0 % beyond
-> the clustering radius, over 4804 camera pairs. The published 0.12 / 0.21 / 0 %
-> are confirmed to the digit.
->
-> **The detector column does not reproduce at a single number**, because it turns
-> out to depend strongly on one methodological choice the original never
-> recorded: how permissively a detector box is attributed to an annotated person.
-> Re-measured over 40 frames × 7 cameras with `yolo11x` @ 1280:
->
-> | IoU gate | mean | p50 | p90 | >0.35 m | >1.00 m | pairs |
-> |---|---|---|---|---|---|---|
-> | 0.1 | 2.17 m | 0.46 m | 5.79 m | 65 % | 26 % | 3354 |
-> | 0.3 | 1.14 m | 0.42 m | 2.57 m | 61 % | 19 % | 2951 |
-> | 0.5 | 0.62 m | 0.39 m | 1.02 m | 58 % | 11 % | 2054 |
-> | **published above** | **1.60 m** | **0.49 m** | **4.50 m** | **64 %** | **31 %** | — |
->
-> The mechanism is now understood: a badly truncated box has *low* IoU with the
-> full GT box, so a strict gate discards exactly the cases that produce the
-> largest disagreement, and the statistic becomes "disagreement given that the
-> detector already produced a good box" — a narrower and much tamer quantity.
-> The published figures sit between the 0.1 and 0.3 rows, consistent with a
-> permissive attribution rule.
->
-> **What is settled, at every threshold tried:** GT boxes agree to 0.12 m and
-> never exceed the clustering radius, while detector boxes disagree by
-> 0.39–0.46 m median with a heavy tail, and 58–65 % of pairs land beyond the
-> 0.35 m merge radius. The diagnosis — the box's bottom edge, not the
-> homography — holds throughout. The exact headline digits are pending a decision
-> on which attribution rule to standardise on, so they are left as published
-> rather than quietly restated.
+That is the threshold-invariant result, and it is the one the rest of this document
+depends on. Reproduce it with:
+
+```bash
+uv run mcreid-wildtrack footpoint --root data/wildtrack_full --n-frames 40 --iou-threshold 0.1
+```
+
+40 frames × 7 cameras, `yolo11x` @ 1280. The detector arm is **canonically reported
+as a sweep, not a single number**, because it depends on how permissively a
+detector box is attributed to an annotated person and no one choice of that is
+privileged:
+
+| same person, two cameras | GT boxes | det. IoU 0.1 | det. IoU 0.3 | det. IoU 0.5 |
+|---|---|---|---|---|
+| mean disagreement | **0.12 m** | 2.17 m | 1.14 m | 0.62 m |
+| p50 | 0.12 m | 0.46 m | 0.42 m | 0.39 m |
+| p90 | **0.21 m** | 5.79 m | 2.57 m | 1.02 m |
+| beyond 0.35 m (merge radius) | **0 %** | 65 % | 61 % | 58 % |
+| beyond 1.00 m (clustering radius) | **0 %** | 26 % | 19 % | 11 % |
+| pairs | 4804 | 3354 | 2951 | 2054 |
+
+Artifacts: `footpoint_iou0.1.json`, `_iou0.3`, `_iou0.5` under
+[`artifacts/`](artifacts/README.md).
+
+**Why the sweep, and why a strict gate is the misleading end of it.** A badly
+truncated box has *low* IoU with the full ground-truth box. Raising the
+attribution threshold therefore discards precisely the cases that produce the
+largest disagreement, and the statistic stops meaning "how far apart do two
+cameras put this person" and starts meaning "…given that the detector already
+produced a good box". That is a different and much tamer question, and it is not
+the one this section is asking. The IoU 0.1 column is the one that still contains
+the occluded people. Reporting the range makes the dependence visible instead of
+hiding it inside one number.
+
+> **Provenance note.** An earlier estimate of this measurement gave 1.60 m mean /
+> 0.49 m p50 / 4.50 m p90 / 64 % beyond 0.35 m / 31 % beyond 1.00 m. It came from
+> a development script that did not record its attribution rule and was not
+> retained. It is **superseded by the sweep above** and is kept here only as
+> history. Its values are consistent with a permissive rule sitting between IoU
+> 0.1 and 0.3, so it was not wrong in magnitude — it was one unlabelled sample
+> from the range now reported in full. The GT column it quoted (0.12 m / 0.21 m /
+> 0 %) reproduced exactly.
 
 The homography is fine. The *input* to it is not: a detection box bottom edge is
 the ground-contact point only when the feet are visible, and in a crowd they are
-occluded by whoever stands in front, truncating the box high. A third of the same
-person's detections consequently land over a metre apart, beyond any clustering
+occluded by whoever stands in front, truncating the box high. A quarter of the same
+person's detection pairs consequently land over a metre apart, beyond any clustering
 radius.
 
 Three interventions were tried and measured; all were essentially null, which is

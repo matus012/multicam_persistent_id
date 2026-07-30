@@ -44,25 +44,32 @@ its point of use rather than left to look artifact-backed:
 2. **The 1–2 ms/frame per-view tracking + fusion cost.** No benchmark exists in
    the suite. It establishes only that detection dominates the budget.
 
-## Partially reproduced: the foot-point table
+## The foot-point measurement: the sweep *is* the result
 
 The root-cause measurement used to be in the list above. It now has a command and
-three artifacts, and the result is split:
+three artifacts, and the canonical form of the claim is the **sweep**, not a single
+number.
 
-- **GT arm: reproduced exactly.** 0.123 m mean, 0.207 m p90, 0 % beyond the
-  clustering radius, 4804 camera pairs. The published 0.12 / 0.21 / 0 % stand.
-- **Detector arm: confirmed in magnitude, not in exact digits.** It depends
-  strongly on how permissively a detector box is attributed to an annotated
-  person, which the original did not record. A strict IoU gate discards the badly
-  truncated boxes that cause the worst disagreement — the statistic silently
-  becomes "disagreement given a good box". The published mean of 1.60 m sits
-  between the IoU 0.3 (1.14 m) and IoU 0.1 (2.17 m) runs.
+**The threshold-invariant result, which is what the analysis rests on:** GT boxes
+place the same person within 0.12 m from any two cameras and never beyond the
+0.35 m merge radius; detector boxes place 58–65 % of those same pairs past it,
+with a heavy tail, at every attribution threshold tested. The box's bottom edge,
+not the homography, is the broken input.
 
-The published figures were deliberately **not** overwritten with any single run.
-The qualitative finding is robust at every threshold tried, and it is the finding
-that matters: GT boxes agree to 0.12 m and never exceed the clustering radius,
-while 58–65 % of detector-box pairs exceed the 0.35 m merge radius with a heavy
-tail. The bottom edge of a detection box, not the homography, is the broken input.
+- **GT arm reproduces exactly** — 0.123 m mean, 0.207 m p90, 0 % beyond the
+  clustering radius, 4804 camera pairs. Identical at every threshold, since the
+  attribution gate only affects the detector arm.
+- **Detector arm is reported as a range** — mean 0.62 m → 2.17 m as the IoU gate
+  loosens from 0.5 to 0.1. This is not noise: a badly truncated box has *low* IoU
+  with the true box, so a strict gate discards precisely the worst cases and the
+  statistic degrades into "disagreement given that the detector already produced a
+  good box". `footpoint_iou0.1.json` is the column that still contains the occluded
+  people.
+
+An earlier development estimate gave 1.60 m mean / 4.50 m p90 / 31 % beyond 1.00 m.
+It did not record its attribution rule and was not retained; it is superseded by
+the sweep and consistent with a permissive rule between IoU 0.1 and 0.3. Kept as a
+provenance note in `../wildtrack_results.md`, not as a competing claim.
 
 The synthetic/cardboard numbers are in a different category: they need no artifact
 because they regenerate deterministically from a seed in about a minute with no
