@@ -288,3 +288,205 @@ def test_pop_removes_and_counts():
 
 def test_empty_gallery_matches_nothing():
     assert DormantGallery().match(_identity(80)) == []
+
+
+# --- retry policy: bounded re-probes after a gate rejection -------------------
+#
+# Shadow session s1 (reports/shadow_s1.csv, 39590 probe rows, 6 return episodes)
+# recorded the dormant appearance distance every frame against frozen copies of
+# every retired identity. Every one of the 8 f+0 gate rejections in that session
+# came under the 0.42 gate by f+7. These tests pin the schedule that exploits it.
+
+
+def _entry_vector(seed: int = 7) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return _unit(rng.normal(size=DIM))
+
+
+def _query_at_distance(target: np.ndarray, distance: float, seed: int = 11) -> np.ndarray:
+    """A unit query whose cosine distance to ``target`` is exactly ``distance``.
+
+    Lets a recorded d(t) trace be replayed through the real gate instead of
+    mocking the decision that is under test.
+    """
+    rng = np.random.default_rng(seed)
+    perp = rng.normal(size=DIM)
+    perp -= perp @ target * target
+    perp = _unit(perp)
+    sim = 1.0 - distance
+    return _unit(sim * target + np.sqrt(max(1.0 - sim**2, 0.0)) * perp)
+
+
+OWNER = 77  # the track that owns every retry in these tests
+OWNERS = {0: OWNER}
+
+
+def _gallery_with_one_entry(vec: np.ndarray, **cfg: object) -> DormantGallery:
+    cfg.setdefault("retry_offsets", (4, 9))  # OFF by default; these tests exercise it
+    gallery = DormantGallery(DormantConfig(**cfg))
+    gallery.admit(1, vec[None, :], frame=0, hits=50)
+    return gallery
+
+
+def test_query_at_distance_helper_is_exact() -> None:
+    """The trace replay is worthless if the harness cannot hit a distance."""
+    vec = _entry_vector()
+    for want in (0.386, 0.4276, 0.4381):
+        got = 1.0 - float(_query_at_distance(vec, want) @ vec)
+        assert got == pytest.approx(want, abs=1e-9)
+
+
+def test_a_gate_rejection_schedules_exactly_two_reprobes() -> None:
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec)
+    assert gallery.match(_query_at_distance(vec, 0.4381)[None, :]) == []
+    assert gallery.schedule_retries_owned(100, OWNER) == 1
+    assert gallery.n_retries_scheduled == 1
+    assert gallery.retries_due(103) == set(), "nothing is owed before f+4"
+    assert gallery.retries_due(104) == {(1, OWNER)}, "first re-probe at f+4"
+    assert gallery.retries_due(108) == set(), "and nothing again until f+9"
+    assert gallery.retries_due(109) == {(1, OWNER)}, "second re-probe at f+9"
+    assert gallery.retries_due(200) == set(), "two retries, then stop"
+
+
+def test_an_accepted_probe_schedules_nothing() -> None:
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec)
+    assert gallery.match(_query_at_distance(vec, 0.20)[None, :]) != []
+    assert gallery.schedule_retries_owned(100, OWNER) == 0
+    assert gallery.retries_due(109) == set()
+
+
+def test_a_rejected_retry_does_not_schedule_further_retries() -> None:
+    """The bound has to hold, or 'two retries' becomes 'retry until it passes'.
+
+    A retry that misses is still a gate rejection, so without the guard it would
+    queue its own successors and the policy would drift into manufacturing a
+    false accept by repetition.
+    """
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec)
+    gallery.match(_query_at_distance(vec, 0.4381)[None, :])
+    gallery.schedule_retries_owned(100, OWNER)
+    gallery.retries_due(104)
+    gallery.match(_query_at_distance(vec, 0.4276)[None, :])
+    assert gallery.schedule_retries_owned(104, OWNER) == 0, "a retry rejection must not re-arm"
+    gallery.retries_due(109)
+    gallery.match(_query_at_distance(vec, 0.4300)[None, :])
+    assert gallery.schedule_retries_owned(109, OWNER) == 0
+    assert gallery.n_retries_scheduled == 1, "one schedule for this return, ever"
+
+
+def test_retry_would_have_prevented_the_s1_rival_record() -> None:
+    """THE regression, from the leak in shadow session s1.
+
+    Track 2 appeared at frame 2401 and probed dormant record 1@1209 at d=0.4381
+    — outside the 0.42 gate by 0.018. It was refused, went on to confirm under a
+    new identity, and retired at frame 2863 as record 2@2863: a RIVAL RECORD of
+    the person it had just failed to match. Two records of one person is what
+    deadlocks the ratio test for every subsequent return.
+
+    The recorded distances for that track against 1@1209 were:
+        f+0  0.4381  rejected
+        f+4  0.4276  still outside the gate
+        f+9  0.3860  INSIDE — recoverable all along, just measured too early
+
+    LIMITATION, stated plainly: this is a TRACE REPLAY, not a pipeline replay. It
+    drives the real gate, the real ratio test and the real retry scheduler with
+    the distances s1 actually recorded, and asserts the decision flips. It does
+    NOT re-run detection, tracking or the track lifecycle — no replay harness
+    exists for that, and the session was a live webcam with no clip retained. So
+    this pins the decision, not the whole causal chain to the rival record.
+    """
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec)
+    trace = {0: 0.4381, 4: 0.4276, 9: 0.3860}
+    birth = 2401
+
+    assert gallery.match(_query_at_distance(vec, trace[0])[None, :]) == [], (
+        "f+0 must still be refused — the gate is unchanged at 0.42"
+    )
+    assert gallery.schedule_retries_owned(birth, OWNER) == 1
+
+    assert gallery.retries_due(birth + 4) == {(1, OWNER)}
+    assert gallery.match(_query_at_distance(vec, trace[4])[None, :]) == [], (
+        "f+4 is genuinely outside the gate for this track; f+9 is what saves it"
+    )
+
+    assert gallery.retries_due(birth + 9) == {(1, OWNER)}
+    recovered = gallery.match(_query_at_distance(vec, trace[9])[None, :])
+    assert recovered == [(0, 1, pytest.approx(trace[9], abs=1e-6))], (
+        "f+9 must recover identity 1, so no rival record is ever minted"
+    )
+    assert gallery.n_retries_fired == 2
+
+
+def test_dropping_f9_loses_the_s1_recovery() -> None:
+    """f+9 is load-bearing, not padding — the control for the test above."""
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec, retry_offsets=(4,))
+    gallery.match(_query_at_distance(vec, 0.4381)[None, :])
+    gallery.schedule_retries_owned(2401, OWNER)
+    assert gallery.retries_due(2405) == {(1, OWNER)}
+    assert gallery.match(_query_at_distance(vec, 0.4276)[None, :]) == []
+    assert gallery.retries_due(2410) == set(), "no second chance without f+9"
+    assert len(gallery) == 1, "identity 1 is still stranded in the gallery"
+
+
+def test_retry_is_not_conditioned_on_truncation() -> None:
+    """s1 measured truncated crops as marginally CLOSER to their own record than
+    clean ones (pooled gap -0.005), so truncation does not predict a bad query.
+    The scheduler must therefore carry no truncation state at all."""
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(DormantConfig)}
+    assert not any("trunc" in name for name in fields), (
+        f"retry policy must not gate on truncation, found: {sorted(fields)}"
+    )
+
+
+def test_resurrection_cancels_a_pending_retry() -> None:
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec)
+    gallery.match(_query_at_distance(vec, 0.4381)[None, :])
+    gallery.schedule_retries_owned(100, OWNER)
+    gallery.pop(1)
+    assert gallery.retries_due(104) == set(), "a recovered identity owes nothing"
+
+
+def test_expiry_cancels_a_pending_retry() -> None:
+    vec = _entry_vector()
+    gallery = _gallery_with_one_entry(vec, ttl_s=1.0)
+    gallery.match(_query_at_distance(vec, 0.4381)[None, :])
+    gallery.schedule_retries_owned(100, OWNER)
+    assert gallery.expire(frame=10_000, dt=1.0 / 30.0) == [1]
+    assert gallery.retries_due(104) == set()
+
+
+def test_no_behaviour_change_outside_the_probe_path() -> None:
+    """Scopes what the retry actually changed.
+
+    The retry IS a deliberate behaviour change on the probe path — that is the
+    point of it — so a blanket "nothing changed" assertion would be false. What
+    must still hold is that it changed *only* that path: with the schedule empty
+    the gallery decides exactly as it did before, and every other mechanism keeps
+    its shipped setting.
+    """
+    vec = _entry_vector()
+    disabled = _gallery_with_one_entry(vec, retry_offsets=())
+
+    assert disabled.match(_query_at_distance(vec, 0.4381)[None, :]) == []
+    assert disabled.schedule_retries_owned(100, OWNER) == 0, "no schedule when the policy is empty"
+    assert disabled.retries_due(104) == set()
+    assert disabled.retries_due(109) == set()
+    assert disabled.n_retries_scheduled == 0
+    assert disabled.n_retries_fired == 0
+    assert len(disabled) == 1, "and the identity stays stranded, exactly as before"
+
+    # Untouched by this change, and each one was a measured decision.
+    shipped = DormantConfig()
+    assert shipped.appearance_distance == pytest.approx(0.42), "gate unchanged"
+    assert shipped.ratio_test == pytest.approx(0.85), "ratio test unchanged"
+    assert shipped.near_miss_margin == 0.0, "duplicate suppression still OFF by default"
+    assert shipped.top_k == 3
+    assert shipped.min_hits == 10

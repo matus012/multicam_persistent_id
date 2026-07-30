@@ -66,8 +66,30 @@ class FusionConfig:
     room and returns minutes later keeps their global ID."""
 
     # --- lifecycle ---
-    n_init: int = 3
-    """Frames of support before a tentative track is confirmed (kills false positives)."""
+    n_init: int = 5
+    """Frames of support before a tentative track is confirmed (kills false positives).
+
+    5, not 3, and not 8-10. Measured on shadow session s1: the flicker mints in
+    that log reached 1, 2, 3 and 4 hits (tracks 5, 3, 4, 10), and the next track
+    up survived 24 — so 5 is the smallest value that kills every observed flicker
+    and nothing between 5 and 24 is distinguishable from the data.
+
+    **Changing this also changes long-gap recall, which is not obvious.**
+    `_adopt_dormant_identity` only considers tracks that are still TENTATIVE with
+    `hits >= 2`, so the dormant-adoption window is exactly `hits in [2, n_init)`
+    — one single frame at the old default of 3. Anyone changing this for
+    false-positive reasons is also changing long-gap recall, and vice versa;
+    `test_adoption_window_is_hits_2_to_n_init` exists to make that fire.
+
+    Measured cost of 3 -> 5 on the cardboard gate, 5 seeds: switch counts and
+    every criterion unchanged, `coverage_visible` 0.9884 -> 0.9826 (seed 42) and
+    0.9832 -> 0.9713 (seeds 1, 2) — two extra frames of confirmation latency per
+    birth, still well above the 0.95 bar.
+
+    What no value of n_init reaches: the one phantom in s1 that actually polluted
+    the gallery had 24 hits before retiring as a rival record. That case needs
+    `DormantConfig.retry_offsets`, which ships OFF by default — so at present
+    nothing in the default path addresses it."""
     max_coast_frames: int = 90
     """Frames a confirmed track may coast with no measurement before going LOST.
     90 @ 30 fps = 3 s, comfortably longer than the 2-3 s total-occlusion target."""
@@ -881,6 +903,11 @@ class GlobalIDManager:
 
         queries = np.stack([c.embedding for c in clusters])
         matches = self.dormant.match(queries, [_cluster_context(c, frame) for c in clusters])
+        # Deliberately does NOT arm a retry. A cluster has no track behind it yet,
+        # so there is no owner to scope the exemption to, and an unscoped retry
+        # lets any track in the scene spend it — the defect that made the first
+        # version of this steal identities. The track born from this cluster
+        # probes again at hits>=2 and arms there, where an owner exists.
         if not matches:
             return clusters
 
@@ -1006,17 +1033,33 @@ class GlobalIDManager:
         """
         if not len(self.dormant):
             return
+        # A scheduled re-probe reopens the window for ONE track against ONE entry,
+        # for this frame only. Without it the retry is unreachable past
+        # confirmation: the window is `hits in [2, n_init)`.
+        #
+        # Adopting after CONFIRMED is a visible ID switch, which is why it is
+        # otherwise refused. It is permitted only for the exact pair that earned
+        # the exemption. An earlier version keyed this by entry alone and treated
+        # "any retry due" as a global switch; review demonstrated a stranger
+        # taking a 500-frame-old confirmed identity through it, and an entry
+        # adopting that had no retry armed at all. Scope is the safety property.
+        due = self.dormant.retries_due(frame)
+        retry_owners = {track_id for _gid, track_id in due}
+        allowed_for = {
+            track_id: {gid for gid, t in due if t == track_id} for track_id in retry_owners
+        }
         candidates = [
             t
             for t in self.tracks
-            if t.state is TrackState.TENTATIVE
+            if (t.state is TrackState.TENTATIVE or t.global_id in retry_owners)
             and t.hits >= 2
             and len(t.gallery) > 0
             # A track that already adopted an identity is done shopping. It stays
             # TENTATIVE until it earns confirmation, so without this it probes
             # again every frame and can hop to a *second* stored record of the
             # same person — trading the identity it just correctly recovered for
-            # the duplicate that recovery was meant to retire.
+            # the duplicate that recovery was meant to retire. This guard holds on
+            # the retry path too: a retry never re-opens an identity already won.
             and t.inherited_hits == 0
         ]
         if not candidates:
@@ -1046,10 +1089,21 @@ class GlobalIDManager:
             return
 
         matches = self.dormant.match(np.stack(queries), contexts)
+        self.dormant.schedule_retries(
+            frame, owners={i: t.global_id for i, t in enumerate(usable)}
+        )
         self._record_near_misses(usable, frame)
 
         for index, global_id, distance in matches:
             track = usable[index]
+            # A confirmed track is here on an exemption, and the exemption names
+            # the entry it was earned against. Anything else it happens to match
+            # is not covered — without this the widened set could still adopt an
+            # entry that armed nothing.
+            if track.state is not TrackState.TENTATIVE and global_id not in allowed_for.get(
+                track.global_id, set()
+            ):
+                continue
             entry = self.dormant.pop(global_id)
             old_id = track.global_id
             track.global_id = global_id
@@ -1124,6 +1178,9 @@ class GlobalIDManager:
             if track.state is not TrackState.DEAD:
                 survivors.append(track)
                 continue
+            # Retry state is keyed by track id. A dead track's id must not leave
+            # a spent-or-pending exemption behind for whatever reuses that id.
+            self.dormant.forget_track(track.global_id)
             # A track that never confirmed was a false positive; storing it would
             # let a hallucination reclaim an identity later. A resurrected track
             # that failed to re-confirm is the exception: its identity was real,

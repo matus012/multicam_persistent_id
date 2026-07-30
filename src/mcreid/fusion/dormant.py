@@ -164,6 +164,54 @@ class DormantConfig:
     """The best candidate must be at least this much better than the runner-up
     (best <= ratio * second_best). Applied only when two or more candidates pass
     the gate. Ambiguous evidence resurrects nothing."""
+    retry_offsets: tuple[int, ...] = ()
+    """Frames after a near-miss gate rejection at which the SAME track may
+    re-probe the SAME dormant entry. ``()`` = OFF, which is the default.
+    ``(4, 9)`` is the value to use with ``--single-occupant``.
+
+    The idea: a returning person is measured against their own record at the
+    worst possible moment — first frame seen, half in frame, mid-stride, against
+    settled whole-body crops. The distance is not wrong, it is *early*.
+
+    **OFF by default on measured evidence, not caution.** Adversarial review
+    (session 3R) drove this against real WILDTRACK crops and the shipped OSNet
+    weights, 650 owner-vs-stranger pairs per gallery shape. Extra probe slots
+    bought **+2.0 to +3.4 points of identity theft for +0.0 points of owner
+    recall**, because on those crops the owner is already inside the gate at f+0.
+    That is the same trade that got PROVENANCE-SUPPRESS shipped OFF in 3g, and it
+    is the wrong direction for a module whose whole premise is that a wrong
+    resurrection costs more than a missed one.
+
+    **The supporting evidence is also thinner than it first looked.** The "8/8
+    recovered" figure came from the shadow log's raw distances, which ignores the
+    ratio test — and the ratio test runs BEFORE the gate. Replayed through the
+    real gallery (one live record per identity, not the shadow's frozen
+    snapshots), four of the six f+0 probes are ``rejected_ambiguous``, which this
+    policy deliberately does not arm on. Reachable evidence is ONE return
+    episode, on the one gallery shape that has no ratio test at all.
+
+    Safe to enable where the harm provably cannot occur: with a single occupant
+    there is no stranger to steal an identity, so the failure mode is pure recall
+    loss. Pool a second live session before considering it as a default.
+
+    Scoping, which is what makes it safe at all: a schedule belongs to one
+    (entry, track) pair, arms only on a NEAR miss (see ``retry_arm_margin``),
+    fires once per pair per presence, and lets only that track adopt only that
+    entry. An entry-keyed schedule — the first implementation — let any track in
+    the scene spend the exemption, and review demonstrated a stranger taking a
+    500-frame-old confirmed identity through it.
+
+    NOT conditioned on truncation: s1 measured truncated crops as marginally
+    *closer* to their own record than clean ones (pooled -0.005), so truncation
+    does not predict a bad query."""
+    retry_arm_margin: float = 0.15
+    """How far past the gate a rejection may sit and still arm a retry, as a
+    fraction of :attr:`appearance_distance`. 0.15 -> arm only within 0.483.
+
+    A retry is for a query that was *early*, so arming has to require a near
+    miss. Without a ceiling the first implementation armed on a probe at
+    d=1.284 — nearly antipodal, unambiguously a different person — and every
+    such arrival opened the gallery to every candidate track for two frames."""
     near_miss_margin: float = 0.0
     """Duplicate suppression for a **single-occupant** gallery. ``0.0`` = OFF,
     which is the default. ``0.10`` is the validated value when enabling it.
@@ -259,6 +307,16 @@ class DormantGallery:
         self.last_attempts: list[MatchAttempt] = []
         """Just the probes from the most recent :meth:`match` call, in query
         order, so the caller can act on rejections as well as acceptances."""
+        self._retry_due: dict[tuple[int, int], list[int]] = {}
+        """(dormant global_id, owning track id) -> pending re-probe frames."""
+        self._retry_armed: set[tuple[int, int]] = set()
+        """Every (entry, track) pair that has ever been armed, so a pair gets ONE
+        schedule per presence and no more. A sliding time window is not a bound:
+        it re-arms forever at a fixed period, which is exactly "keep asking until
+        the gate lets something through". Cleared when the entry leaves the
+        gallery or the track dies."""
+        self.n_retries_scheduled = 0
+        self.n_retries_fired = 0
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -317,6 +375,9 @@ class DormantGallery:
         if len(self._entries) >= self.config.max_entries and global_id not in self._entries:
             oldest = min(self._entries.values(), key=lambda e: e.retired_frame)
             del self._entries[oldest.global_id]
+            # Eviction is a removal like any other. Skipping this strands retry
+            # state that both blocks re-arming and outlives the entry it belongs to.
+            self.cancel_retries(oldest.global_id)
             logger.debug("dormant gallery full — evicted global id %d", oldest.global_id)
 
         self._entries[global_id] = DormantEntry(
@@ -353,6 +414,7 @@ class DormantGallery:
         ]
         for gid in stale:
             del self._entries[gid]
+            self.cancel_retries(gid)
             self.n_expired += 1
             logger.info(
                 "frame %d: dormant global id %d expired (TTL %.0f s)",
@@ -361,6 +423,106 @@ class DormantGallery:
                 self.config.ttl_s,
             )
         return stale
+
+    def schedule_retries(self, frame: int, owners: dict[int, int] | None = None) -> int:
+        """Queue re-probes for entries the last :meth:`match` rejected on the gate.
+
+        Call immediately after :meth:`match`. Reads :attr:`last_attempts`, so it
+        schedules against the entry each query *nearly* matched — the best-ranked
+        one on the ungated row — rather than against the gallery at large.
+
+        Returns the number of schedules created. Idempotent within a schedule's
+        own lifetime: an entry with retries still pending, or whose schedule
+        ended less than ``max(retry_offsets)`` frames ago, is not rescheduled.
+        Without that guard a rejected retry would schedule its own successors and
+        the "two retries, then stop" bound would not hold.
+        """
+        offsets = self.config.retry_offsets
+        if not offsets:
+            return 0
+        ceiling = self.config.appearance_distance * (1.0 + self.config.retry_arm_margin)
+        created = 0
+        for attempt in self.last_attempts:
+            if attempt.outcome != REJECTED_GATE:
+                continue
+            best = attempt.best
+            if best is None:
+                continue
+            gid, distance = best
+            owner = owners.get(attempt.query_index) if owners else None
+            if owner is None:
+                # No identifiable owner means no way to scope the retry to the
+                # track that earned it, and an unscoped retry is an open door:
+                # it lets ANY track adopt on that frame. Refuse to arm instead.
+                continue
+            if gid not in self._entries:
+                continue
+            # A near miss is a query that was early. A miss by a mile is a
+            # different person, and arming on one opens the gallery to every
+            # candidate for two frames on the strength of no evidence at all.
+            if distance > ceiling:
+                continue
+            key = (gid, owner)
+            if key in self._retry_due or key in self._retry_armed:
+                continue
+            self._retry_due[key] = [frame + off for off in sorted(offsets)]
+            self._retry_armed.add(key)
+            self.n_retries_scheduled += 1
+            created += 1
+            logger.info(
+                "frame %d: dormant id %d rejected on the gate at %.3f by track %d — "
+                "re-probing at %s (that track only)",
+                frame,
+                gid,
+                distance,
+                owner,
+                ", ".join(f"f+{off}" for off in sorted(offsets)),
+            )
+        return created
+
+    def schedule_retries_owned(self, frame: int, owner: int = 0) -> int:
+        """Convenience for a single-query probe: arm every query to ``owner``."""
+        return self.schedule_retries(
+            frame, owners={a.query_index: owner for a in self.last_attempts}
+        )
+
+    def retries_due(self, frame: int) -> set[tuple[int, int]]:
+        """``(dormant_id, track_id)`` pairs owed a re-probe at or before ``frame``.
+
+        Consumes what it returns. The pairing is the safety property: a retry is
+        an exemption earned by ONE track against ONE identity, and returning bare
+        ids would let any track in the scene spend it.
+        """
+        due: set[tuple[int, int]] = set()
+        for key, pending in list(self._retry_due.items()):
+            if not any(f <= frame for f in pending):
+                continue
+            remaining = [f for f in pending if f > frame]
+            if remaining:
+                self._retry_due[key] = remaining
+            else:
+                del self._retry_due[key]
+            if key[0] in self._entries:
+                due.add(key)
+                self.n_retries_fired += 1
+        return due
+
+    def cancel_retries(self, global_id: int) -> None:
+        """Forget every pending and spent re-probe for one identity.
+
+        Called on every path that removes an entry — resurrection, expiry and
+        capacity eviction. Missing one strands state that both blocks future
+        arming and keeps a stale exemption alive.
+        """
+        for key in [k for k in self._retry_due if k[0] == global_id]:
+            del self._retry_due[key]
+        self._retry_armed = {k for k in self._retry_armed if k[0] != global_id}
+
+    def forget_track(self, track_id: int) -> None:
+        """Drop retry state for a track that has died, so its id can be reused."""
+        for key in [k for k in self._retry_due if k[1] == track_id]:
+            del self._retry_due[key]
+        self._retry_armed = {k for k in self._retry_armed if k[1] != track_id}
 
     def would_duplicate(self, global_id: int, same_as: int | None) -> int | None:
         """The stored identity ``global_id`` would become a rival record of.
@@ -523,5 +685,6 @@ class DormantGallery:
     def pop(self, global_id: int) -> DormantEntry:
         """Remove and return an identity being resurrected."""
         entry = self._entries.pop(global_id)
+        self.cancel_retries(global_id)
         self.n_resurrected += 1
         return entry

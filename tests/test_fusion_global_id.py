@@ -462,3 +462,271 @@ def test_a_clipped_box_is_flagged_truncated() -> None:
     assert by_track[1].truncated is False, "a box inside the frame is not truncated"
     assert by_track[2].truncated is True, "a box clipped by the frame edge must be flagged"
     assert by_track[2].position_sigma_m > by_track[1].position_sigma_m
+
+
+# --- n_init: two jobs, both pinned -------------------------------------------
+#
+# n_init is overloaded. It is the false-positive filter AND, because
+# _adopt_dormant_identity only considers tracks that are still TENTATIVE with
+# hits >= 2, it silently sets the dormant-adoption window to `hits in
+# [2, n_init)`. Shadow session s1 measured what that costs: recovery of the four
+# recorded track-EMA gate rejections by window alone was 1/4 at n_init=3, 2/4 at
+# 5, 3/4 at 8, 4/4 at 10. The retry policy now owns recovery, which is what frees
+# n_init to be chosen as a filter — but the coupling still exists, so it is
+# pinned here rather than left to be rediscovered by a third live session.
+
+
+@pytest.mark.parametrize("n_init", [2, 3, 5, 8, 10])
+def test_adoption_window_is_hits_2_to_n_init(n_init: int) -> None:
+    """A track must stay adoptable for every hit in [2, n_init).
+
+    If a future change shrinks this — by confirming earlier, or by raising the
+    hits>=2 floor — long-gap recall drops silently, because nothing downstream
+    reports "the identity was recoverable but the window had closed".
+    """
+    cams = bedroom_rig()
+    cfg = FusionConfig(n_init=n_init)
+    mgr = GlobalIDManager(_rig(), cfg)
+    embed = _unit_embedding(16, 0)
+
+    adoptable = 0
+    for frame in range(n_init + 4):
+        views = _views_for_all_cameras(cams, (3.0, 2.5), embed, frame)
+        mgr.step(views, frame, DT)
+        for track in mgr.tracks:
+            if track.state is TrackState.TENTATIVE and track.hits >= 2:
+                adoptable += 1
+
+    expected = max(n_init - 2, 0)
+    assert adoptable == expected, (
+        f"n_init={n_init} should leave {expected} adoptable frame(s), got {adoptable}. "
+        "The dormant-adoption window is hits in [2, n_init) — see FusionConfig.n_init."
+    )
+
+
+def test_n_init_default_is_5_and_kills_every_flicker_measured_in_s1() -> None:
+    """The four flicker mints in shadow session s1 reached 1, 2, 3 and 4 hits.
+
+    Tracks 5, 3, 4 and 10 respectively. The next track up survived 24 hits, so
+    nothing between 5 and 24 is distinguishable from that session — 5 is the
+    smallest value that kills all four, and any larger choice buys confirmation
+    latency for no measured benefit.
+    """
+    assert FusionConfig().n_init == 5
+
+    s1_flicker_hits = {"track 5": 1, "track 3": 2, "track 4": 3, "track 10": 4}
+    for name, hits in s1_flicker_hits.items():
+        assert hits < FusionConfig().n_init, f"{name} ({hits} hits) would still confirm"
+
+    # And the honest limit of this parameter: the phantom that actually polluted
+    # the s1 gallery reached 24 hits and retired as a rival record. No n_init in
+    # any sane range reaches it — only the retry does.
+    assert FusionConfig().n_init < 24, (
+        "s1's rival-record track is out of n_init's reach by construction; the "
+        "retry policy is what covers that case"
+    )
+
+
+def test_retry_ships_off_by_default() -> None:
+    """OFF by default, on measured evidence — see DormantConfig.retry_offsets.
+
+    Adversarial review measured the retry buying +2.0 to +3.4 points of identity
+    theft for +0.0 points of owner recall on real WILDTRACK crops, and showed a
+    stranger taking a 500-frame-old confirmed identity through the entry-keyed
+    version of the schedule. It is available under --single-occupant, where the
+    harm provably cannot occur, and nowhere else until a second live session.
+    """
+    mgr = GlobalIDManager(_rig())
+    assert mgr.dormant.config.retry_offsets == (), "retry must not ship on by default"
+    assert mgr.dormant.config.appearance_distance == pytest.approx(0.42), (
+        "the gate is unchanged — the retry re-asks, it does not lower the bar"
+    )
+    assert mgr.dormant.config.ratio_test == pytest.approx(0.85), "ratio test unchanged"
+
+
+# --- retry scoping: the defects adversarial review found in the first version ---
+#
+# Every test below fails against a specific degenerate implementation that the
+# original test suite accepted. The stub each one kills is named in its docstring.
+
+
+def _dormant_manager(offsets: tuple[int, ...] = (4, 9)) -> GlobalIDManager:
+    cfg = FusionConfig(dormant=DormantConfig(retry_offsets=offsets, min_hits=1))
+    return GlobalIDManager(_rig(), cfg)
+
+
+def _query_at(distance: float, dim: int = 16) -> FloatArray:
+    """A unit query exactly ``distance`` from `_unit_embedding(dim, 0)`.
+
+    Built analytically: a near miss has to land in a narrow band (outside the
+    0.42 gate, inside the 0.483 arming ceiling) and a hand-mixed vector silently
+    lands inside the gate instead, testing nothing.
+    """
+    sim = 1.0 - distance
+    vec = sim * _unit_embedding(dim, 0) + np.sqrt(max(1.0 - sim**2, 0.0)) * _unit_embedding(dim, 1)
+    return vec / np.linalg.norm(vec)
+
+
+NEAR_MISS = 0.45  # outside the 0.42 gate, inside the 0.42*1.15 arming ceiling
+
+
+def test_a_retry_is_scoped_to_the_track_that_earned_it() -> None:
+    """Kills the stub where `retries_due` returns bare ids (stub S7).
+
+    The first version keyed schedules by dormant entry alone and treated "any
+    retry due" as a global switch, so a DIFFERENT person walking in could spend
+    the exemption and take the dormant identity. Review demonstrated exactly that
+    on the full pipeline. The schedule is now a (entry, track) pair.
+    """
+    mgr = _dormant_manager()
+    embed = _unit_embedding(16, 0)
+    mgr.dormant.admit(1, embed[None, :], frame=0, hits=50)
+
+    # Track 42 misses by a hair and arms a retry against entry 1.
+    near = _query_at(NEAR_MISS)
+    mgr.dormant.match(near[None, :])
+    assert mgr.dormant.schedule_retries(100, owners={0: 42}) == 1
+
+    due = mgr.dormant.retries_due(104)
+    assert due == {(1, 42)}, f"the exemption belongs to track 42 alone, got {due}"
+    assert all(track_id == 42 for _gid, track_id in due), (
+        "no other track may consume this retry"
+    )
+
+
+def test_arming_requires_a_near_miss_not_any_miss() -> None:
+    """Kills the stub with no distance ceiling (review defect D3).
+
+    The first version armed on ANY gate rejection, including one measured at
+    d=1.284 — nearly antipodal, unambiguously a different person. Every arrival
+    then opened the gallery to every candidate track for two frames.
+    """
+    mgr = _dormant_manager()
+    mgr.dormant.admit(1, _unit_embedding(16, 0)[None, :], frame=0, hits=50)
+
+    stranger = _unit_embedding(16, 7)  # orthogonal -> distance 1.0
+    mgr.dormant.match(stranger[None, :])
+    assert mgr.dormant.schedule_retries(100, owners={0: 9}) == 0, (
+        "a miss by a mile is a different person, not an early query"
+    )
+    assert mgr.dormant.retries_due(104) == set()
+
+
+def test_an_unowned_probe_never_arms() -> None:
+    """A schedule with no owner would be spendable by anyone — refuse to make one.
+
+    This is why the birth-cluster path no longer arms: a cluster has no track
+    behind it yet, so there is nobody to scope the exemption to.
+    """
+    mgr = _dormant_manager()
+    mgr.dormant.admit(1, _unit_embedding(16, 0)[None, :], frame=0, hits=50)
+    mgr.dormant.match(_query_at(NEAR_MISS)[None, :])
+    assert mgr.dormant.schedule_retries(100, owners=None) == 0
+    assert mgr.dormant.schedule_retries(100, owners={}) == 0
+
+
+def test_the_bound_is_once_per_pair_not_a_sliding_window() -> None:
+    """Kills the stub whose re-arm horizon lets it fire forever (stub S2).
+
+    The first version blocked re-arming only while `frame - ended <= horizon`, so
+    it re-armed on a fixed 19-frame period: 16 schedules and 32 retries over 300
+    frames of continuous rejection. That is "keep asking until the gate lets
+    something through", which is what the docstring claimed it was not.
+    """
+    mgr = _dormant_manager()
+    mgr.dormant.admit(1, _unit_embedding(16, 0)[None, :], frame=0, hits=50)
+    near = _query_at(NEAR_MISS)
+
+    for frame in range(0, 300):
+        mgr.dormant.match(near[None, :])
+        mgr.dormant.schedule_retries(frame, owners={0: 5})
+        mgr.dormant.retries_due(frame)
+
+    assert mgr.dormant.n_retries_scheduled == 1, (
+        f"one pair, one presence, one schedule — got "
+        f"{mgr.dormant.n_retries_scheduled} over 300 frames of rejection"
+    )
+    assert mgr.dormant.n_retries_fired <= 2, "and at most the two offsets"
+
+
+def test_cancel_retries_is_observed_directly_not_through_retries_due() -> None:
+    """Kills the no-op `cancel_retries` stub (stub S5).
+
+    The old cancellation tests asserted through `retries_due`, which independently
+    checks `gid in self._entries` — so they passed with cancellation removed
+    entirely. Assert the state itself.
+    """
+    mgr = _dormant_manager()
+    mgr.dormant.admit(1, _unit_embedding(16, 0)[None, :], frame=0, hits=50)
+    mgr.dormant.match(_query_at(NEAR_MISS)[None, :])
+    mgr.dormant.schedule_retries(100, owners={0: 3})
+
+    assert any(k[0] == 1 for k in mgr.dormant._retry_due)
+    mgr.dormant.cancel_retries(1)
+    assert not any(k[0] == 1 for k in mgr.dormant._retry_due), "pending state must be gone"
+    assert not any(k[0] == 1 for k in mgr.dormant._retry_armed), "and the armed record too"
+
+
+def test_capacity_eviction_cancels_retry_state() -> None:
+    """Review defect D7: eviction dropped the entry but kept its retry state,
+    which then blocked the same id from ever arming again after re-admission."""
+    cfg = FusionConfig(dormant=DormantConfig(retry_offsets=(4, 9), max_entries=2, min_hits=1))
+    mgr = GlobalIDManager(_rig(), cfg)
+    for gid in (1, 2):
+        mgr.dormant.admit(gid, _unit_embedding(16, gid)[None, :], frame=gid, hits=50)
+    sim = 1.0 - NEAR_MISS
+    near = sim * _unit_embedding(16, 1) + np.sqrt(1.0 - sim**2) * _unit_embedding(16, 9)
+    mgr.dormant.match((near / np.linalg.norm(near))[None, :])
+    mgr.dormant.schedule_retries(100, owners={0: 8})
+
+    mgr.dormant.admit(3, _unit_embedding(16, 3)[None, :], frame=200, hits=50)  # evicts id 1
+    assert 1 not in mgr.dormant
+    assert not any(k[0] == 1 for k in mgr.dormant._retry_due), "eviction must cancel too"
+    assert not any(k[0] == 1 for k in mgr.dormant._retry_armed)
+
+
+def test_a_retry_adoption_is_a_VISIBLE_id_switch_in_step_output() -> None:
+    """The cost of the retry, made explicit and observable.
+
+    Adopting while TENTATIVE is invisible downstream — the candidate id was never
+    reported to anyone. Adopting on a retry is not: by then the track has
+    CONFIRMED and its id has been in `step()` output, so the correction shows up
+    as a renumbered track. That is a real ID switch and any metric counting
+    switches will count it.
+
+    It is accepted ONLY under --single-occupant, where the identity recovered can
+    only be the one occupant's. In the default path `retry_offsets` is empty and
+    this cannot happen at all. This test exists so the trade is pinned in the
+    suite rather than living in a docstring: if someone turns the retry on by
+    default, they are turning THIS on.
+    """
+    cams = bedroom_rig()
+    cfg = FusionConfig(
+        n_init=3,
+        dormant=DormantConfig(retry_offsets=(4, 9), min_hits=1, ttl_s=1e6),
+    )
+    mgr = GlobalIDManager(_rig(), cfg)
+
+    dormant_id = 77
+    home = _unit_embedding(16, 0)
+    mgr.dormant.admit(dormant_id, home[None, :], frame=0, hits=50)
+
+    near_miss = _query_at(NEAR_MISS)  # outside the gate, inside the arming ceiling
+    reported: dict[int, set[int]] = {}
+    for frame in range(12):
+        # Near-miss appearance until the track has confirmed, then the person's
+        # real appearance — the crop filling out, which is the premise of the
+        # whole policy.
+        embed = near_miss if frame < 2 else home
+        views = _views_for_all_cameras(cams, (3.0, 2.5), embed, frame)
+        snaps = mgr.step(views, frame, DT)
+        reported[frame] = {s.global_id for s in snaps}
+
+    seen = [ids for ids in reported.values() if ids]
+    assert seen, "the track must be reported at some point"
+    before, after = seen[0], seen[-1]
+    assert before != after, (
+        f"expected a visible corrective switch in step() output, saw {before} throughout"
+    )
+    assert after == {dormant_id}, f"the track must end up under the dormant id, got {after}"
+    assert mgr.dormant.n_retries_fired >= 1, "and it must be the retry that did it"
