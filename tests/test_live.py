@@ -238,3 +238,55 @@ def test_backend_is_called_once_per_frame() -> None:
     for i in range(5):
         session.process(_frame(), now=i / 30, dt=1 / 30)
     assert backend.calls == 5
+
+
+# --- CLI wiring: the flag must actually reach the config ---------------------
+#
+# Shadow session s2 was run with --single-occupant and the retry never fired.
+# The config field existed, was documented, and was covered by unit tests; what
+# nothing asserted was that the FLAG REACHED IT. The command body built a
+# DormantConfig that simply never mentioned retry_offsets, so it stayed at its
+# OFF default. These tests close that class of bug, not just the instance.
+
+
+def test_single_occupant_enables_every_listed_mechanism() -> None:
+    """THE s2 regression: --single-occupant must switch on the whole list."""
+    from mcreid.cli.live import (
+        SINGLE_OCCUPANT_NEAR_MISS_MARGIN,
+        SINGLE_OCCUPANT_RETRY_OFFSETS,
+        resolve_fusion_config,
+    )
+
+    cfg = resolve_fusion_config(dormant_gate=None, single_occupant=True)
+    assert cfg is not None, "--single-occupant must produce a config, not fall through"
+    assert cfg.dormant.retry_offsets == SINGLE_OCCUPANT_RETRY_OFFSETS == (4, 9), (
+        "the retry never fired in s2 because this was left at its OFF default"
+    )
+    assert cfg.dormant.near_miss_margin == SINGLE_OCCUPANT_NEAR_MISS_MARGIN == 0.10
+
+
+def test_default_run_leaves_both_single_occupant_mechanisms_off() -> None:
+    """Neither mechanism may leak into a plain multi-person run.
+
+    The retry is exploitable with more than one person in frame (adversarial
+    review demonstrated a stranger taking a dormant identity), so "off unless
+    the flag is given" is a safety property, not a preference.
+    """
+    from mcreid.cli.live import resolve_fusion_config
+    from mcreid.fusion.global_id import FusionConfig
+
+    assert resolve_fusion_config(dormant_gate=None, single_occupant=False) is None
+    shipped = FusionConfig().dormant
+    assert shipped.retry_offsets == ()
+    assert shipped.near_miss_margin == 0.0
+
+
+def test_a_gate_override_alone_does_not_enable_single_occupant_mechanisms() -> None:
+    """--dormant-gate is a sweep knob and must not smuggle the retry in with it."""
+    from mcreid.cli.live import resolve_fusion_config
+
+    cfg = resolve_fusion_config(dormant_gate=0.40, single_occupant=False)
+    assert cfg is not None
+    assert cfg.dormant.appearance_distance == pytest.approx(0.40)
+    assert cfg.dormant.retry_offsets == ()
+    assert cfg.dormant.near_miss_margin == 0.0

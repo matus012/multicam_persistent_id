@@ -39,6 +39,37 @@ app = typer.Typer(add_completion=False, help="Live single-camera tracking.")
 
 WINDOW = "mcreid live"
 
+# Every mechanism --single-occupant switches on. Named here so the flag's full
+# effect is one list, and `test_single_occupant_enables_every_listed_mechanism`
+# can assert the resolver actually applies all of it.
+SINGLE_OCCUPANT_NEAR_MISS_MARGIN = 0.10
+SINGLE_OCCUPANT_RETRY_OFFSETS = (4, 9)
+
+
+def resolve_fusion_config(
+    dormant_gate: float | None, single_occupant: bool
+) -> FusionConfig | None:
+    """Turn the CLI flags into a `FusionConfig`, or None to keep the defaults.
+
+    Extracted from the command body so it can be tested without a webcam. That
+    is not a stylistic preference: shadow session s2 was run with
+    `--single-occupant` and the retry never fired, because the inline version of
+    this built a `DormantConfig` that simply never mentioned `retry_offsets`.
+    The field existed, was documented and was covered by unit tests; nothing
+    asserted that the FLAG REACHED IT. A config resolver that cannot be called
+    from a test cannot be checked, so this one can.
+    """
+    if dormant_gate is None and not single_occupant:
+        return None
+    gate = dormant_gate if dormant_gate is not None else DormantConfig().appearance_distance
+    return FusionConfig(
+        dormant=DormantConfig(
+            appearance_distance=gate,
+            near_miss_margin=SINGLE_OCCUPANT_NEAR_MISS_MARGIN if single_occupant else 0.0,
+            retry_offsets=SINGLE_OCCUPANT_RETRY_OFFSETS if single_occupant else (),
+        )
+    )
+
 
 @app.command()
 def run(
@@ -141,15 +172,8 @@ def run(
             weights=weights, imgsz=imgsz, conf_threshold=conf, embedder=embedder
         ),
     )
-    fusion_config = None
-    if dormant_gate is not None or single_occupant:
-        gate = dormant_gate if dormant_gate is not None else DormantConfig().appearance_distance
-        fusion_config = FusionConfig(
-            dormant=DormantConfig(
-                appearance_distance=gate,
-                near_miss_margin=0.10 if single_occupant else 0.0,
-            )
-        )
+    fusion_config = resolve_fusion_config(dormant_gate, single_occupant)
+    if fusion_config is not None:
         if dormant_gate is not None:
             typer.echo(f"dormant appearance gate overridden: {dormant_gate:.2f}")
         if single_occupant:

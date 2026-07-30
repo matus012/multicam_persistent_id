@@ -118,6 +118,16 @@ class DormantEntry:
     retired_frame: int
     hits: int
     cameras_seen: tuple[str, ...]
+    retired_elapsed_s: float = 0.0
+    """Session elapsed seconds when this identity went dormant.
+
+    The TTL is a *duration*, so it has to be measured against accumulated time.
+    It used to be evaluated as ``frames_dormant > ttl_s / dt`` with the CURRENT
+    frame's ``dt`` — which is not a duration at all, because a single slow frame
+    shrinks the frame budget for every entry at once. Measured in shadow session
+    s2: one 0.608 s frame (12.8x the 0.0475 s median) collapsed the budget from
+    ~12,600 frames to 987 and evicted an entry that was 1,631 frames old, 58 s
+    into a 600 s TTL."""
     # Purely informational — the dormant path makes no position claim, and this
     # is never used for gating. It exists so logs are debuggable.
     last_world_xy: FloatArray = field(default_factory=lambda: np.full(2, np.nan))
@@ -307,6 +317,10 @@ class DormantGallery:
         self.last_attempts: list[MatchAttempt] = []
         """Just the probes from the most recent :meth:`match` call, in query
         order, so the caller can act on rejections as well as acceptances."""
+        self._elapsed_s = 0.0
+        """Accumulated session seconds, advanced by :meth:`expire`. The TTL is
+        measured against this rather than against frames x the current dt, which
+        is not a duration and collapses on a single slow frame."""
         self._retry_due: dict[tuple[int, int], list[int]] = {}
         """(dormant global_id, owning track id) -> pending re-probe frames."""
         self._retry_armed: set[tuple[int, int]] = set()
@@ -386,6 +400,7 @@ class DormantGallery:
             retired_frame=frame,
             hits=hits,
             cameras_seen=cameras_seen,
+            retired_elapsed_s=self._elapsed_s,
             last_world_xy=(
                 np.full(2, np.nan)
                 if last_world_xy is None
@@ -403,23 +418,30 @@ class DormantGallery:
         return True
 
     def expire(self, frame: int, dt: float) -> list[int]:
-        """Drop identities past their TTL. Returns the ids removed."""
+        """Drop identities past their TTL. Returns the ids removed.
+
+        Advances the gallery's own elapsed clock by ``dt`` and expires on
+        accumulated seconds. Must be called once per step even when the gallery
+        is empty, or the clock stops and every later TTL is understated.
+        """
+        self._elapsed_s += max(dt, 0.0)
         if not self._entries:
             return []
-        ttl_frames = self.config.ttl_s / max(dt, 1e-9)
         stale = [
             gid
             for gid, entry in self._entries.items()
-            if (frame - entry.retired_frame) > ttl_frames
+            if (self._elapsed_s - entry.retired_elapsed_s) > self.config.ttl_s
         ]
+        entry_elapsed = {gid: self._entries[gid].retired_elapsed_s for gid in stale}
         for gid in stale:
             del self._entries[gid]
             self.cancel_retries(gid)
             self.n_expired += 1
             logger.info(
-                "frame %d: dormant global id %d expired (TTL %.0f s)",
+                "frame %d: dormant global id %d expired after %.0f s dormant (TTL %.0f s)",
                 frame,
                 gid,
+                self._elapsed_s - entry_elapsed[gid],
                 self.config.ttl_s,
             )
         return stale

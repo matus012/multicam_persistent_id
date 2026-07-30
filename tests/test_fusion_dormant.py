@@ -134,9 +134,17 @@ def test_entries_expire_after_ttl():
     gallery.admit(1, _identity(30), frame=0, hits=50)
     dt = 1 / 30
 
-    assert gallery.expire(frame=200, dt=dt) == [], "200 frames = 6.7 s, still inside the TTL"
-    assert len(gallery) == 1
-    assert gallery.expire(frame=400, dt=dt) == [1], "400 frames = 13.3 s, past the TTL"
+    # The TTL is a DURATION, so drive the clock the way a session does: one
+    # expire() per step, each advancing by dt. Asserting it from a single call
+    # with a big frame number is what let the frame-based bug through.
+    for frame in range(1, 201):  # 200 frames @ 1/30 s = 6.7 s
+        assert gallery.expire(frame=frame, dt=dt) == []
+    assert len(gallery) == 1, "6.7 s is still inside the 10 s TTL"
+
+    removed: list[int] = []
+    for frame in range(201, 401):  # to 13.3 s
+        removed += gallery.expire(frame=frame, dt=dt)
+    assert removed == [1], "past 10 s the identity must go"
     assert len(gallery) == 0
 
 
@@ -205,7 +213,8 @@ def test_suppression_never_forgets_someone_for_nothing():
     person = _identity(91)
     gallery = DormantGallery(DormantConfig(ttl_s=10.0, near_miss_margin=0.10))
     gallery.admit(1, person[:3], frame=0, hits=609)
-    gallery.expire(frame=400, dt=1 / 30)  # 13.3 s: id 1 is gone
+    for frame in range(1, 401):  # 13.3 s of accumulated time: id 1 is gone
+        gallery.expire(frame=frame, dt=1 / 30)
     assert gallery.ids == []
 
     assert gallery.admit(2, person[3:], frame=401, hits=40, same_as=1), (
@@ -459,7 +468,10 @@ def test_expiry_cancels_a_pending_retry() -> None:
     gallery = _gallery_with_one_entry(vec, ttl_s=1.0)
     gallery.match(_query_at_distance(vec, 0.4381)[None, :])
     gallery.schedule_retries_owned(100, OWNER)
-    assert gallery.expire(frame=10_000, dt=1.0 / 30.0) == [1]
+    expired: list[int] = []
+    for frame in range(1, 200):  # ttl_s=1.0, so ~30 frames @ 1/30 s suffices
+        expired += gallery.expire(frame=frame, dt=1.0 / 30.0)
+    assert expired == [1]
     assert gallery.retries_due(104) == set()
 
 
@@ -490,3 +502,74 @@ def test_no_behaviour_change_outside_the_probe_path() -> None:
     assert shipped.near_miss_margin == 0.0, "duplicate suppression still OFF by default"
     assert shipped.top_k == 3
     assert shipped.min_hits == 10
+
+
+# --- TTL is a duration, not a frame budget -----------------------------------
+
+
+def test_one_slow_frame_does_not_evict_a_young_entry() -> None:
+    """THE s2 regression, with that session's measured numbers.
+
+    The TTL used to be evaluated as ``frames_dormant > ttl_s / dt`` using the
+    CURRENT frame's dt. That is not a duration: it re-derives a frame budget every
+    step from whatever the last frame happened to cost, so one slow frame shrinks
+    the budget for every entry at once.
+
+    In s2 the loop ran at a 0.0475 s median (21 FPS) and frame 4220 took 0.6079 s
+    — a 12.8x hiccup. On that one frame the budget collapsed from ~12,600 frames
+    to 987, and an entry 1,631 frames old was evicted 58 s into a 600 s TTL. The
+    person returned 30 frames later, matched the evicted entry at d=0.374-0.404
+    (well inside the 0.42 gate) on all 7 probed frames, and was minted as a new
+    identity because there was nothing left to match.
+    """
+    median_dt, hiccup_dt = 0.0475, 0.6079
+    gallery = DormantGallery(DormantConfig(ttl_s=600.0))
+    gallery.admit(1, _identity(70), frame=0, hits=50)
+
+    for frame in range(1, 1632):  # 1631 frames at 21 FPS ~ 77 s
+        assert gallery.expire(frame=frame, dt=median_dt) == []
+
+    assert gallery.expire(frame=1632, dt=hiccup_dt) == [], (
+        "a single 0.61 s frame must not evict an entry 77 s into a 600 s TTL"
+    )
+    assert 1 in gallery, "the identity the returning person needed must still be there"
+
+
+def test_ttl_is_measured_in_accumulated_seconds_not_frames() -> None:
+    """Same wall-clock elapsed must expire the same, at any frame rate.
+
+    A frame-budget TTL makes a 60 FPS session hold identities for half as long in
+    wall-clock terms as a 30 FPS one, for no stated reason.
+    """
+    elapsed: dict[float, int] = {}
+    for dt in (1 / 15, 1 / 30, 1 / 60):
+        gallery = DormantGallery(DormantConfig(ttl_s=10.0))
+        gallery.admit(1, _identity(71), frame=0, hits=50)
+        frame = 0
+        while len(gallery):
+            frame += 1
+            gallery.expire(frame=frame, dt=dt)
+            assert frame < 10_000, "expiry must terminate"
+        elapsed[dt] = frame
+
+    seconds = {dt: n * dt for dt, n in elapsed.items()}
+    for dt, secs in seconds.items():
+        assert secs == pytest.approx(10.0, abs=2 * dt), (
+            f"at dt={dt:.4f} the identity lived {secs:.2f} s, expected ~10 s "
+            f"(frames={elapsed[dt]})"
+        )
+
+
+def test_the_clock_advances_even_when_the_gallery_is_empty() -> None:
+    """Otherwise time stops while nobody is dormant and every later TTL is short."""
+    gallery = DormantGallery(DormantConfig(ttl_s=10.0))
+    for frame in range(1, 301):  # 10 s of empty-gallery steps
+        gallery.expire(frame=frame, dt=1 / 30)
+
+    gallery.admit(1, _identity(72), frame=300, hits=50)
+    for frame in range(301, 451):  # 5 s dormant
+        assert gallery.expire(frame=frame, dt=1 / 30) == [], (
+            "the entry is 5 s old; the 10 s already elapsed before it existed "
+            "must not count against it"
+        )
+    assert 1 in gallery
