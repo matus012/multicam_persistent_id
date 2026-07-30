@@ -22,9 +22,8 @@ same ID when the person reappears.*
 
 > **This GIF is the synthetic reproduction of the scenario, not real footage.**
 > The real four-camera capture is pending — the recording protocol is written and
-> ready in [capture_guide.md](capture_guide.md), and the synthetic scene
-> reproduces its exact geometry and occlusion timeline so only the detector
-> front-end is new when the clips arrive.
+> ready, and the synthetic scene reproduces its exact geometry and occlusion
+> timeline so only the detector front-end is new when the clips arrive.
 
 ---
 
@@ -70,11 +69,19 @@ square, dozens of people at once, wide baselines, 400 annotated frames at 2 fps.
 It is run here as a **failure analysis**, not as a benchmark claim. Full
 write-up: [docs/wildtrack_results.md](docs/wildtrack_results.md).
 
-![WILDTRACK stress test](docs/assets/wildtrack_demo.gif)
-
-*Three of the seven cameras and the BEV, real footage. One number and one colour
-still follow a person across views — `[3cam]` marks a track fused across three
-views — but the map is visibly denser than the number of real people.*
+> **No WILDTRACK render ships with this repo.** The frames are EPFL's, they show
+> identifiable members of the public, and this project's position is that dataset
+> pixels are not redistributed — a rendered animation of them is still the data.
+> Reproduce it locally in about a minute once the dataset is fetched:
+>
+> ```bash
+> uv run mcreid-wildtrack-demo --root data/wildtrack_full --n-frames 120
+> ```
+>
+> What it shows, and the reason this section exists: one number and one colour do
+> still follow a person across views — `[3cam]` marks a track fused across three
+> views — but the BEV map is visibly denser than the number of real people. The
+> tables below quantify exactly that.
 
 ### The cause: a bounding box's bottom edge is not a foot
 
@@ -170,8 +177,9 @@ tried in order:
    the strictest stage: tighter threshold, top-k mean instead of max-similarity,
    and a ratio test that resurrects nothing when two identities fit comparably.
 
-Design decisions worth knowing, all forced by measurement rather than taste, are
-in [context.md](context.md) §4.
+Every design decision above was forced by measurement rather than taste; the
+ones that cost the most to learn are in [Limitations](#limitations) and
+[Stress test](#stress-test--where-this-breaks-and-why).
 
 ---
 
@@ -264,8 +272,8 @@ uv run mcreid-calibrate report --calib calib/rig.json --capture-dir footage/cali
 ```
 
 `report` is a hard gate: it renders a metric floor grid into every view and
-refuses to pass a calibration that does not reproduce it. See
-[capture_guide.md](capture_guide.md) for the recording protocol.
+refuses to pass a calibration that does not reproduce it, printing what to
+re-measure when it fails.
 
 ---
 
@@ -341,11 +349,18 @@ src/mcreid/
   cli/      calibrate · demo · live · sync · eval · wildtrack · wildtrack-demo
 ```
 
-- [context.md](context.md) — scope, locked architecture, design rationale
-- [status.txt](status.txt) — current phase, blockers, next steps
 - [docs/wildtrack_results.md](docs/wildtrack_results.md) — real-footage validation
 
 ## Licence
 
-AGPL-3.0-only. Vendored OSNet architecture is MIT (see
-`src/mcreid/track/vendor/osnet.py`).
+AGPL-3.0-only — full text in [LICENSE](LICENSE). The strong copyleft is not a
+preference: the GPU detection path depends on Ultralytics YOLO11, which is
+AGPL-3.0, so anything distributing this pipeline inherits that obligation.
+
+The vendored OSNet architecture is MIT and carries its own notice — see
+`src/mcreid/track/vendor/osnet.py`.
+
+Third-party data and weights are **not** redistributed here. WILDTRACK is
+obtained from EPFL CVLab under their terms via `scripts/download_wildtrack.py`;
+OSNet weights are fetched from the authors and SHA-256 pinned. No dataset
+frames, and no renders derived from them, are committed to this repository.
