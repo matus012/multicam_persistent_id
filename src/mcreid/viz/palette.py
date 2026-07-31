@@ -35,3 +35,23 @@ def dim(color: BGR, factor: float = 0.45) -> BGR:
     if not 0.0 <= factor <= 1.0:
         raise ValueError(f"factor must be in [0, 1], got {factor}")
     return (int(color[0] * factor), int(color[1] * factor), int(color[2] * factor))
+
+
+# Camera identity colours, BGR. Deliberately NOT from `id_color`: a camera tile
+# border and a person's ID share one screen, and a viewer who has to ask "is
+# that colour a camera or a person?" has already lost the thread. These are
+# pastel//desaturated where `id_color` is saturated, so the two families read
+# apart at a glance even for a viewer who cannot distinguish the hues.
+_CAMERA_COLORS: tuple[BGR, ...] = (
+    (90, 180, 250),  # amber
+    (250, 190, 90),  # sky
+    (150, 245, 150),  # mint
+    (245, 150, 245),  # orchid
+)
+
+
+def camera_color(index: int) -> BGR:
+    """Stable BGR colour for the n-th camera tile, matching its BEV frustum."""
+    if index < 0:
+        raise ValueError(f"camera index must be non-negative, got {index}")
+    return _CAMERA_COLORS[index % len(_CAMERA_COLORS)]

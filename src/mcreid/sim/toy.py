@@ -708,3 +708,160 @@ def crossing_scene(
         seed=seed,
         floor_extent_m=(0.0, 0.0, width, depth),
     )
+
+
+def demo_rig(
+    image_size: tuple[int, int] = (640, 360),
+    room: tuple[float, float] = (6.0, 5.0),
+) -> tuple[VirtualCamera, ...]:
+    """Three cameras for the showcase render, not four.
+
+    `bedroom_rig` mirrors the real mount plan and is what the gates run on. This
+    rig exists for one reason: three camera tiles plus the BEV tile fill a 2x2
+    grid exactly, so every tile is a quarter of the frame. A four-camera mosaic
+    either shrinks each tile to a fifth of the screen or leaves a hole, and the
+    previous dense demo was rejected as illegible. Legibility is the spec here.
+
+    **90 degree horizontal FOV, not the 70 default.** Measured, not chosen for
+    looks: three 70-degree cameras do not cover a 6x5 room, and the hero's loop
+    crosses the gaps. With no occlusions scripted at all — nothing to recover
+    from — that rig still fragmented the hero across 3 global IDs. At 90 degrees
+    the same walk holds ONE ID with 0.995 visible coverage. A showcase that has
+    to explain away churn caused by its own camera placement showcases nothing.
+    """
+    width, depth = room
+    return (
+        VirtualCamera(
+            "cam0", (0.3, 0.3, 2.2), 45.0, 26.0, hfov_deg=90.0, image_size=image_size
+        ),
+        VirtualCamera(
+            "cam1", (width - 0.3, 0.3, 2.2), 135.0, 26.0, hfov_deg=90.0, image_size=image_size
+        ),
+        VirtualCamera(
+            "cam2",
+            (width / 2.0, depth - 0.3, 2.4),
+            270.0,
+            26.0,
+            hfov_deg=90.0,
+            image_size=image_size,
+        ),
+    )
+
+
+def hpc_demo_scene(
+    fps: float = 30.0,
+    seed: int = DEFAULT_SEED,
+    room: tuple[float, float] = (6.0, 5.0),
+    image_size: tuple[int, int] = (640, 360),
+) -> ToySceneConfig:
+    """Showcase scene: handoff, then coast-through-occlusion, then resurrection.
+
+    Three events, in order, each separated by a settle window so only one thing
+    is happening on screen at a time:
+
+    1. **Cross-camera handoff.** The hero is visible to cam0 only, then briefly
+       to both, then to cam1 only. The supporting-camera set changes while the
+       global ID does not.
+    2. **Total occlusion.** Hidden from every camera for 2.5 s — inside
+       ``max_coast_frames`` (90 = 3 s), so the track coasts on the motion model
+       and re-locks without ever dying.
+    3. **Dead gap and resurrection.** Hidden from every camera for 13 s. That is
+       past ``reid_window_frames`` (300 = 10 s), so the live track is gone and
+       the re-association gallery cannot serve the return: recovery has to come
+       from the dormant gallery, which is the mechanism being showcased. It is
+       far inside ``DormantConfig.ttl_s`` (600 s), so the entry is still there to
+       be found — the gap has to clear one threshold without clearing the other,
+       and 13 s is the middle of that window.
+
+    The occlusions are scripted, exactly as `cardboard_scene` scripts them: they
+    are the scene's ground truth about who can see whom. Everything downstream —
+    which cameras support a track, whether it coasts, whether the returning
+    person recovers the original ID — is the pipeline's own doing on that input.
+
+    A distractor is present throughout and is never occluded, so "the ID was
+    held" cannot be earned by a tracker that simply never mints a second
+    identity. No static false positive: this render is a showcase, not a gate,
+    and a permanent fourth box on screen costs more in legibility than it buys
+    in rigour. The gates in `tests/` keep the false positive.
+    """
+    cams = demo_rig(image_size=image_size, room=room)
+    width, depth = room
+
+    def f(seconds: float) -> int:
+        return int(round(seconds * fps))
+
+    # --- the schedule, in seconds, so changing fps keeps the physical timing.
+    # The 4.5 s -> 6.0 s hole between the two handoff windows is deliberate and
+    # load-bearing: in it nothing hides the hero, all three cameras hold them at
+    # once, and that overlap is what makes the change of hands a handoff rather
+    # than a loss followed by a re-acquisition.
+    handoff_a = (0.0, 4.5)  # hero on cam0 + cam2
+    handoff_b = (6.0, 9.5)  # hero on cam1 + cam2
+    blackout = (12.5, 15.0)  # 2.5 s, inside max_coast_frames
+    dead_gap = (18.5, 31.5)  # 13 s, past reid_window_frames
+    n_frames = f(37.0)
+
+    # The loop is inset 1.7 m in Y specifically to clear the camera mounts by
+    # 1.45 m. This is the single most sensitive number in the scene: at 0.85 m
+    # of mount clearance — a loop only 0.6 m wider — the hero passes almost
+    # directly under cam2, its boxes truncate and destabilise, and the SAME walk
+    # with no occlusions scripted at all issues 12 global IDs instead of 2. At
+    # 1.45 m it issues exactly 2, one per person. `long_gap_scene` records the
+    # same lesson for distractors; it applies to the hero just as hard.
+    hero = AgentSpec(
+        agent_id=1,
+        waypoints_m=(
+            (1.1, 1.7),
+            (width - 1.1, 1.9),
+            (width - 1.3, depth - 1.7),
+            (1.3, depth - 1.8),
+        ),
+        speed_mps=1.0,
+    )
+    # Never occluded, never leaves. Placement SOLVED, not guessed: the point of
+    # maximum clearance from the hero's loop that is still visible to all three
+    # cameras and at least a metre from every mount. The first version of this
+    # scene put the distractor where it looked reasonable and the two paths
+    # closed to 0.62 m — inside `merge_radius_m` (0.75) and well inside
+    # `birth_cluster_radius_m` (1.0) — so the hero lost its ID at frame 254 to a
+    # merge with the distractor, which reads on screen as a tracker failure and
+    # is really a scene-design failure. Clearance is now 1.39 m.
+    distractor = AgentSpec(
+        agent_id=2,
+        waypoints_m=((3.7, 0.4), (3.9, 0.8)),
+        speed_mps=0.3,
+        height_m=1.63,
+        start_offset_m=0.3,
+    )
+
+    events = [
+        # 1 — handoff. Hiding the hero from the camera that is not meant to hold
+        # them yet is what makes the supporting set change; with 90-degree
+        # cameras covering the whole room, no handoff would ever occur otherwise.
+        #
+        # cam2 watches THROUGHOUT, and only cam0 -> cam1 changes hands. An
+        # earlier version blinded cam2 for the whole 9.5 s phase and dropped the
+        # hero to a single camera; restoring two cameras in one frame is an
+        # association shock no real walk produces, and it spawned a duplicate
+        # identity (135 frames) that had nothing to do with the handoff being
+        # demonstrated. Never fewer than two cameras now.
+        # The gap between these two windows is the handoff itself: all three
+        # cameras hold the hero at once, which is what makes the change of hands
+        # a handoff rather than a loss and a re-acquisition.
+        OcclusionEvent(1, f(handoff_a[0]), f(handoff_a[1]), ("cam1",), label="hero on cam0 + cam2"),
+        OcclusionEvent(1, f(handoff_b[0]), f(handoff_b[1]), ("cam0",), label="hero on cam1 + cam2"),
+        # 2 — total occlusion, every camera.
+        OcclusionEvent(1, f(blackout[0]), f(blackout[1]), None, label="total occlusion 2.5 s"),
+        # 3 — dead gap, every camera.
+        OcclusionEvent(1, f(dead_gap[0]), f(dead_gap[1]), None, label="hero out of the room 13 s"),
+    ]
+
+    return ToySceneConfig(
+        cameras=cams,
+        agents=(hero, distractor),
+        occlusions=tuple(events),
+        n_frames=n_frames,
+        fps=fps,
+        seed=seed,
+        floor_extent_m=(0.0, 0.0, width, depth),
+    )
