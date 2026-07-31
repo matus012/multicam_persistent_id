@@ -15,7 +15,9 @@ command fails rather than narrating it anyway.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -117,6 +119,54 @@ def _write_video(frames: list[Image], path: Path, fps: float) -> Path:
     return path
 
 
+def _write_highlight_gif(
+    narrated: list[Image],
+    marks: list[EventMark],
+    path: Path,
+    fps: float,
+    lead_s: float = 1.5,
+    tail_s: float = 0.6,
+    stride: int = 3,
+    width: int = 720,
+) -> Path:
+    """A condensed GIF: a short run-up to each event, then its freeze.
+
+    Not the whole clip. A 57 s render at any usable resolution is tens of MB as
+    a GIF, and this repository whitelists embedded assets one file at a time
+    precisely because a careless one cost it 5.9 MB of history. The README that
+    embeds this says plainly that it is an excerpt and links the command that
+    rebuilds the full video.
+    """
+    try:
+        import imageio.v2 as imageio
+    except ImportError as exc:  # pragma: no cover - dev extra
+        raise RuntimeError("GIF export needs the dev extra: uv pip install -e '.[dev]'") from exc
+
+    lead, tail = int(round(lead_s * fps)), int(round(tail_s * fps))
+    keep: list[int] = []
+    for mark in marks:
+        # `narrated` still holds the freeze copies, so the window that follows an
+        # event lands on its frozen caption rather than running past it.
+        start = max(0, mark.rendered_index - lead)
+        end = min(len(narrated), mark.rendered_index + int(round(mark.hold_s * fps)) + tail)
+        keep.extend(range(start, end, stride))
+
+    if not keep:
+        raise ValueError("no highlight frames selected")
+    scale = width / narrated[0].shape[1]
+    height = int(narrated[0].shape[0] * scale)
+    frames: list[Any] = [
+        cv2.cvtColor(
+            cv2.resize(narrated[i], (width, height), interpolation=cv2.INTER_AREA),
+            cv2.COLOR_BGR2RGB,
+        )
+        for i in keep
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    imageio.mimsave(path, frames, duration=stride / fps, loop=0)
+    return path
+
+
 def _build_marks(
     snapshots: list[list[GlobalTrackSnapshot]], hero: int, config: FusionConfig, fps: float
 ) -> list[EventMark]:
@@ -180,6 +230,9 @@ def _build_marks(
 @app.command()
 def render(
     out: Path = typer.Option(Path("reports/hpc_demo.mp4"), help="Output mp4 path."),
+    gif: Path = typer.Option(
+        None, help="Also write a condensed highlights GIF (README-sized) here."
+    ),
     seed: int = typer.Option(42, help="RNG seed."),
     fps: float = typer.Option(30.0, help="Scene and output frame rate."),
     log_level: str = typer.Option("INFO", help="Logging level."),
@@ -287,6 +340,7 @@ def render(
     ] * hold
 
     by_frame = {m.frame: m for m in marks}
+    placed: list[EventMark] = []
     active: EventMark | None = None
     for index, panel in enumerate(panels):
         mark = by_frame.get(index)
@@ -296,6 +350,8 @@ def render(
         detail = active.detail if active else ""
         frame = np.vstack([panel, caption_bar(width, title, detail, bar_h)])
         stamp_watermark(frame, WATERMARK)
+        if mark is not None:
+            placed.append(replace(mark, rendered_index=len(video)))
         video.append(frame)
         if mark is not None:
             video.extend([frame.copy()] * int(round(mark.hold_s * config.fps)))
@@ -317,6 +373,9 @@ def render(
     )
 
     path = _write_video(video, out, config.fps)
+    if gif is not None:
+        gif_path = _write_highlight_gif(video, placed, gif, config.fps)
+        typer.echo(f"wrote {gif_path}  |  {gif_path.stat().st_size / 1e6:.1f} MB")
     seconds = len(video) / config.fps
     size_mb = path.stat().st_size / 1e6
     typer.echo(f"wrote {path}  |  {len(video)} frames  {seconds:.1f} s  {size_mb:.1f} MB")

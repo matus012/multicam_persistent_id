@@ -25,6 +25,36 @@ same ID when the person reappears.*
 > ready, and the synthetic scene reproduces its exact geometry and occlusion
 > timeline so only the detector front-end is new when the clips arrive.
 
+### Walkthrough — three events, narrated
+
+![three-event walkthrough](docs/assets/hpc_demo.gif)
+
+*One person crosses between cameras, is hidden from all of them, then leaves the
+room for long enough to be forgotten — and comes back under the same global ID.
+Per-camera tiles plus a metric floor plan; each camera's coverage is washed onto
+the plan in that camera's tile colour.*
+
+The three captions are **detected from the pipeline's output**, not from the
+script that generated the scene: the handoff caption fires on the frame the
+supporting-camera set actually changed, and the resurrection caption on the frame
+the manager actually recovered the ID from the dormant gallery. If a mechanism
+stops working the caption does not appear and the render fails, rather than
+narrating an event that did not happen.
+
+On this scene the tracker reports exactly two global IDs for two people, with the
+hero holding one ID across all three events. That is this scene, not a general
+claim — [Results](#results) and [Limitations](#limitations) are the measured
+ones, and the adversarial long-gap case does **not** hold in general.
+
+The GIF above is a highlights excerpt. Build the full 57 s video with:
+
+```bash
+uv run mcreid-hpc-demo --out reports/hpc_demo.mp4
+```
+
+> **Synthetic, like everything above.** Procedural agents and a schematic
+> renderer — no real or dataset footage appears in it.
+
 ---
 
 ## Results
@@ -308,6 +338,17 @@ current bar, not a broken install. Writes `outputs/demo/cardboard.mp4` and `.gif
 Across the five gate seeds the hero is clean on two and takes one switch on three;
 seeds 7 and 42 are the clean ones. Full distribution in [Results](#results), and
 why the former perfect score is gone in [Limitations](#limitations).
+
+The narrated walkthrough from the top of this README is a separate scene — three
+cameras, two people, three events — and exits 0:
+
+```bash
+uv run mcreid-hpc-demo --out reports/hpc_demo.mp4 --gif docs/assets/hpc_demo.gif
+```
+
+Writes a 57 s mp4, and with `--gif` the highlights excerpt embedded above. It
+fails loudly if any of the three events stops being detectable in the pipeline's
+output, so it cannot narrate a mechanism that has regressed.
 
 Install the perception stack (CUDA 12.6) for anything involving real video:
 

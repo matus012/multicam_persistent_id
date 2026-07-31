@@ -43,6 +43,10 @@ class EventMark:
     """Freeze-frame duration. The reviewer reads the caption here, so this is
     the difference between a demo that can be followed and the dense one that
     was rejected."""
+    rendered_index: int = -1
+    """Where this event landed in the assembled video, which is NOT ``frame``.
+    Title cards and the freezes of earlier events both shift it. Filled in
+    during assembly; anything slicing the finished video must use this."""
 
 
 def _present(snapshots: list[list[GlobalTrackSnapshot]], gid: int) -> list[bool]:

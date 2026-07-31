@@ -9,6 +9,10 @@ a churning identity. So the scene invariants are asserted, not eyeballed.
 
 from __future__ import annotations
 
+import dataclasses
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -242,3 +246,44 @@ def test_caption_bar_height_is_fixed_regardless_of_text_length() -> None:
 def test_text_card_matches_requested_size() -> None:
     card = text_card((1280, 892), "Heading", [("claim", "value")], footer="foot")
     assert card.shape[:2] == (892, 1280)
+
+
+def test_event_mark_rendered_index_defaults_to_unset() -> None:
+    """Slicing the finished video by `frame` would cut the wrong place.
+
+    The assembled video carries a title card and a freeze per earlier event, so
+    a mark's position in it drifts further from its scene frame with every event
+    that precedes it. `rendered_index` is the only correct handle, and it starts
+    invalid so an un-placed mark cannot silently be used as one.
+    """
+    from mcreid.viz.story import EventMark
+
+    mark = EventMark(frame=100, title="t", detail="d", global_id=1)
+    assert mark.rendered_index == -1
+
+    placed = dataclasses.replace(mark, rendered_index=178)
+    assert placed.rendered_index == 178
+    assert placed.frame == 100, "placing a mark must not move its scene frame"
+
+
+def test_highlight_gif_windows_land_on_the_captioned_frames() -> None:
+    """The GIF must show the captions, which only exist from the event frame on."""
+    from mcreid.cli.hpc_demo import _write_highlight_gif
+    from mcreid.viz.story import EventMark
+
+    frames = [np.full((100, 200, 3), i % 255, dtype=np.uint8) for i in range(400)]
+    marks = [
+        dataclasses.replace(
+            EventMark(frame=50, title="a", detail="", global_id=1, hold_s=1.0),
+            rendered_index=100,
+        ),
+        dataclasses.replace(
+            EventMark(frame=200, title="b", detail="", global_id=1, hold_s=1.0),
+            rendered_index=300,
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_highlight_gif(
+            frames, marks, Path(tmp) / "g.gif", fps=30.0, lead_s=0.5, tail_s=0.2, width=100
+        )
+        assert path.exists() and path.stat().st_size > 0
