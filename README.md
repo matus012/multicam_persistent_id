@@ -31,13 +31,18 @@ same ID when the person reappears.*
 
 ### Primary — persistent ID under occlusion
 
-Synthetic, five seeds. The scene is not a single agent: it contains the hero, a
+Synthetic. The scene is not a single agent: it contains the hero, a
 second person present throughout, and a persistent false positive, because with
 one agent alone "zero ID switches" is achievable by any tracker that never mints
 a second identity — a stateless 25-line stub passed an earlier version of this
 gate, so the scene composition is now asserted by a test.
 
-Seeds 1, 7, 42, 123, 2024. Reproduce any row with
+**Two seed sets, and the rows below say which.** The first four rows are the
+cardboard gate: five seeds, 1 / 7 / 42 / 123 / 2024. The last two rows are a
+*different* scene, the long-gap gate, on **three** seeds: 1 / 42 / 2024. An
+earlier revision of this README printed "five seeds" above the whole table and
+"on all seeds" inside the last two rows, which reads as a claim over the five
+when it was only ever measured on the three. Reproduce any row with
 `uv run mcreid-demo synthetic --scenario cardboard --seed <s>`, or all of it with
 `uv run pytest tests/test_pipeline_integration.py tests/test_pipeline_long_gap.py`.
 
@@ -47,13 +52,26 @@ Seeds 1, 7, 42, 123, 2024. Reproduce any row with
 | hero ID switches across the whole clip | **0 on 2/5 seeds, 1 on the other 3** |
 | BEV dot alive through the blackout | **75/75 frames, all 5 seeds** |
 | scene-wide switches (hero + distractor + false positive) | 1 on four seeds, **3 on seed 1** |
-| long-gap re-ID, 75 s absence, distractor present throughout | identity **recovered under its original ID** on all seeds |
-| adversarial long-gap, stranger present only during the absence | stranger **never** inherits the dormant identity |
+| long-gap re-ID, 75 s absence, distractor present throughout | identity **recovered under its original ID** on 3/3 gate seeds — **12/15** on a wider sweep |
+| adversarial long-gap, stranger present only during the absence | stranger does not inherit the dormant identity on 3/3 gate seeds — but **9/15** on a wider sweep collapse both people onto one ID |
 
 The last two rows assert *recovery*, not a clean path: a duplicate track can exist
 for ~4 frames at the instant of reappearance, because the returning person is
 confirmed by one camera before the multi-camera cluster resurrects the real ID.
 It self-heals via the duplicate merge and costs counted switches while it lasts.
+
+**The adversarial row does not generalise past its three gate seeds, and the
+wider sweep is the honest number.** Running the same intruder scene over 15 seeds
+(1–12 plus 42, 123, 2024) collapses the hero and the intruder onto a *single*
+global ID on 9 of them — 2, 3, 4, 5, 6, 8, 10, 12, 123. The direction is the bad
+one: the hero migrates onto the intruder's ID rather than the intruder being
+refused, so the returning person also fails to come back under their original ID
+on 10 of the 15. None of the three gate seeds (1, 42, 2024) is affected, which is
+precisely why the gate stayed green and the claim survived this long. An earlier
+revision of this README stated flatly that the stranger *never* inherits the
+identity; that is refuted, and the row above is demoted to what is actually
+measured. The gate seeds are not being widened to paper over this — the collapse
+is a real defect with a root cause still open, tracked as a limitation below.
 
 The appearance model in this generator is **fitted to the operating point
 measured on real WILDTRACK crops**, not to published ReID numbers. Published
@@ -364,6 +382,16 @@ re-measure when it fails.
 
 ## Limitations
 
+- **A returning person can be merged with the stranger who was there while they
+  were away.** On the adversarial long-gap scene, 9 of 15 seeds end with the hero
+  and the intruder sharing one global ID — the hero migrates onto the *intruder's*
+  ID after returning. This is the worst failure mode the dormant gallery has,
+  because it launders an identity swap into a confident-looking track, and it is
+  the exact thing the adversarial gate was written to catch. It does not fire on
+  any of that gate's three seeds, so the suite is green while the defect is real;
+  the root cause is not yet found and the fix is open work. Treat "the stranger
+  cannot inherit a dormant identity" as unproven, not as a property of this
+  system.
 - **The headline scenario is not perfect, and the numbers are synthetic.** On the
   cardboard gate the hero takes **1 ID switch on 3 of 5 seeds** and survives the
   2.5 s total occlusion on 4 of 5. An earlier version of this README reported
