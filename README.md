@@ -60,6 +60,17 @@ for ~4 frames at the instant of reappearance, because the returning person is
 confirmed by one camera before the multi-camera cluster resurrects the real ID.
 It self-heals via the duplicate merge and costs counted switches while it lasts.
 
+**That self-healing is a multi-camera mechanism and does not engage on one
+camera.** The duplicate merge applies its permissive gate only to two tracks
+measured in the same frame by *disjoint* camera sets — the signature of one
+person split across cameras. On a single-camera rig that condition can never
+hold, so the merge falls back to its strict gate and a duplicate can persist. In
+a live single-camera session a returning person held two global identities
+simultaneously for 190 frames (~9 s), both still alive when the session ended,
+with a single detection alternating between them. Read the ~4-frame figure above
+as a property of the multi-camera synthetic gate, not as a bound for
+`mcreid-live`.
+
 **The adversarial row does not generalise past its three gate seeds, and the
 wider sweep is the honest number.** Running the same intruder scene over 15 seeds
 (1–12 plus 42, 123, 2024) collapses the hero and the intruder onto a *single*
